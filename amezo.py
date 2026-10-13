@@ -367,6 +367,260 @@ def admin_delete(folder, res, comm):
     sys.stdout.write(HEADER)
     sys.exit(0)
 
+def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
+    """板の index.html (next_int != 21 のときは index2.html) を再生成する。
+    戻り値: (index_name, status)
+      status: 'done'   再生成した
+              'cached' 直近に更新済みのため再生成しなかった (use_cache=True のときのみ)
+              'busy'   他のプロセスが再生成中でロックを取れなかった
+    """
+    # blist.txt から板の背景色とタイトル取得
+    color = ""
+    title = ""
+    try:
+        with open('./blist.txt', 'r', encoding='utf-8') as rf:
+            for line in rf:
+                line = line.rstrip('\r\n')
+                if not line:
+                    continue
+                parts = line.split(',')
+                if parts[0] == folder:
+                    color = parts[1] if len(parts) > 1 else ''
+                    title = parts[2] if len(parts) > 2 else ''
+                    break
+    except FileNotFoundError:
+        pass
+
+    page_suffix = '2' if next_int != 21 else ''
+    index_name = f"index{page_suffix}.html"
+    index_path = f"./{folder}/{index_name}"
+    main_title_suffix = "(メイン)" if folder == 'main' else ''
+
+    bg_attr = ""
+    color_parts = color.split('!')
+    color = color_parts[0]
+    if len(color_parts) > 1:
+        bg_attr = f' background="{color_parts[1]}"'
+
+    text_attr = ""
+    if color.endswith('*'):
+        text_attr = ' text="#ffffff" link="red" vlink="orange"'
+        color = color[:-1]
+
+    title = title.replace('#c#', ',')
+    title0 = title
+    amezo_name = AMEZO
+    m_title = re.search(r'alt="([^"]+)', title0)
+    if m_title:
+        title0 = m_title.group(1)
+        amezo_name = ""
+
+    # キャッシュチェック
+    if use_cache:
+        if next_int == 21 and reload_flag and POST_INTERVAL > 0:
+            try:
+                mtime = os.path.getmtime(index_path)
+                if time.time() - mtime < POST_INTERVAL:
+                    return index_name, 'cached'
+            except OSError:
+                pass
+
+        if next_int != 21 and PAGE_CACHE > 0:
+            try:
+                with open(index_path, 'r', encoding='utf-8') as pf:
+                    head = pf.read(4096)
+                m_next = re.search(r'<!-- AMEZO-NEXT (\d+) -->', head)
+                if m_next and int(m_next.group(1)) == next_int:
+                    mtime = os.path.getmtime(index_path)
+                    if time.time() - mtime < PAGE_CACHE:
+                        return index_name, 'cached'
+            except OSError:
+                pass
+
+    # ロック獲得とインデックス再生成
+    lock_path = f"./{folder}/regen.lock"
+    try:
+        lk_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o644)
+        LK = os.fdopen(lk_fd, 'w')
+    except OSError:
+        error("ロックファイルを作成できません.")
+
+    locked = False
+    if next_int == 21 and not reload_flag:
+        # ブロッキングロック (CGIタイムアウトを考慮し最大10秒)
+        for _ in range(100):
+            try:
+                fcntl.flock(LK, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except BlockingIOError:
+                time.sleep(0.1)
+    else:
+        try:
+            fcntl.flock(LK, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except BlockingIOError:
+            pass
+
+    if not locked:
+        LK.close()
+        return index_name, 'busy'
+
+    tmp_path = f"{index_path}.tmp{os.getpid()}"
+    try:
+        W = open(tmp_path, 'w', encoding='utf-8')
+    except OSError:
+        LK.close()
+        error("indexを書き込めません.")
+
+    W.write(
+        f'<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">\n'
+        f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f'<link rel="stylesheet" href="../style.css">\n'
+        f'<title>{title0}{amezo_name}{main_title_suffix}</title></head>\n'
+        f'{COPYRIGHT}\n'
+        f'<!-- AMEZO-NEXT {next_int} -->\n'
+        f'<body{bg_attr} bgcolor="{color}"{text_attr}>\n'
+        f'<font size=+2>{title}{amezo_name}{main_title_suffix}</font>\n'
+    )
+
+    if os.path.exists('./header.html'):
+        try:
+            with open('./header.html', 'r', encoding='utf-8') as hf:
+                W.write(hf.read())
+        except OSError:
+            pass
+
+    W.write(
+        f'<form method=post action="../amezo.cgi">\n'
+        f'<input type=submit value="次のページ">\n'
+        f'<input type=text name="next" value="{next_int}" size="3">〜</form>\n'
+        f'<font size=2>\n<!-- HEAD LINE -->\n'
+    )
+
+    # ディレクトリ走査してヘッドラインをソート生成
+    files = []
+    try:
+        for f_name in os.listdir(f"./{folder}"):
+            if re.match(r'^\d+\.html$', f_name):
+                try:
+                    mtime = int(os.path.getmtime(f"./{folder}/{f_name}"))
+                except OSError:
+                    mtime = 0
+                files.append((f"{mtime:011d}", f_name))
+    except OSError:
+        pass
+
+    files.sort(key=lambda x: x[0], reverse=True)
+
+    # 古いスレッドを退避 (oスレッドID.html)
+    if MAX_THREADS > 0:
+        n_thr = 0
+        filtered_files = []
+        for ts, f_name in files:
+            n_thr += 1
+            if n_thr > MAX_THREADS:
+                if not os.path.exists(f"./{folder}/o{f_name}"):
+                    try:
+                        os.rename(f"./{folder}/{f_name}", f"./{folder}/o{f_name}")
+                    except OSError:
+                        pass
+            else:
+                filtered_files.append((ts, f_name))
+        files = filtered_files
+
+    start_idx = next_int - 21
+    for i in range(start_idx, start_idx + 100):
+        if i >= len(files):
+            break
+        ts, f_name = files[i]
+        ttl = ""
+        try:
+            with open(f"./{folder}/{f_name}", 'r', encoding='utf-8') as rf:
+                first_line = rf.readline()
+                m_ttl = re.search(r'<b>([^<]*)</b>', first_line)
+                if m_ttl:
+                    ttl = m_ttl.group(1)
+        except OSError:
+            pass
+        W.write(f' {i+1}<a href="{f_name}">{ttl}</a>\n')
+
+    W.write("<!-- HEAD LINE END -->\n</font>\n")
+
+    # 各スレッドの内容表示
+    for i in range(start_idx, next_int - 1):
+        if i >= len(files):
+            break
+        ts, f_name = files[i]
+        W.write('<table border=1 cellspacing=1 cellpadding=2 width=100% bgcolor="#efefef"><tr><td><font color="#000000">\n')
+
+        lines = []
+        try:
+            with open(f"./{folder}/{f_name}", 'r', encoding='utf-8') as rf:
+                first_line = rf.readline()
+                # スレッドの先頭行から html/head/body/meta/title/link を削って出力
+                first_line = re.sub(r'</?(?:html|head|body)[^>]*>', '', first_line)
+                first_line = re.sub(r'<(?:meta|link)[^>]*>', '', first_line)
+                first_line = re.sub(r'<title>.*?</title>', '', first_line)
+                W.write(first_line)
+
+                for line in rf:
+                    if line.startswith('<form'):
+                        break
+                    lines.append(line)
+        except OSError:
+            pass
+
+        # 最初の1レスと最後の7レスのみを抜粋して表示
+        k = len(lines) - 7
+        if k < 0:
+            k = 0
+        for m in range(k, len(lines)):
+            W.write(lines[m])
+
+        res_id = f_name.replace('.html', '')
+        sub_tag = ""
+        if len(lines) > 200:
+            k_idx = len(lines) - 98
+            sub_tag = (f'<input type=text name="from" value="{k_idx}" size="4">'
+                       '<input type=submit name="sub" value="〜"> ')
+
+        links = (f'<div class="row links"><a href="{res_id}.html">レス全部を見る</a> '
+                 f'{sub_tag}<a href="#top">上へ</a> <a href="./">リロード</a></div>')
+
+        W.write('</font></td></tr></table>\n' + reply_form(res_id, links) + '<hr>\n')
+
+    W.write(
+        f'<form method=post action="../amezo.cgi">\n'
+        f'<input type=submit value="次のページ">\n'
+        f'<input type=text name="next" value="{next_int}" size="3">〜</form>\n'
+        f'<hr></body></html>\n'
+    )
+    W.close()
+
+    # 元の index ファイルに置き換え
+    try:
+        if os.path.exists(index_path):
+            orig_mode = os.stat(index_path).st_mode & 0o7777
+        else:
+            orig_mode = 0o644
+        os.chmod(tmp_path, orig_mode)
+        os.replace(tmp_path, index_path)
+    except OSError:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        error("indexを更新できません.")
+
+    try:
+        fcntl.flock(LK, fcntl.LOCK_UN)
+        LK.close()
+    except OSError:
+        pass
+
+    return index_name, 'done'
+
 # =========================================================================
 # メインロジック
 # =========================================================================
