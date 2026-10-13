@@ -1,4 +1,3 @@
-%%writefile setup_expose.py
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
