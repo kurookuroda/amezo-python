@@ -1,4 +1,3 @@
-%%writefile amezo.py
 # -*- coding: utf-8 -*-
 #
 # amezo.py - Python 版あめぞう風掲示板
