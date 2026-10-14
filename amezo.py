@@ -121,7 +121,7 @@ def client_ip():
         return xff[-1]
     return addr
 
-# ---- パスワードハッシュ ---------------------------------
+# ---- パスワードハッシュ (admin.py からも使う) ---------------------------------
 
 def make_hash(password, iterations=HASH_ITERATIONS, salt=None):
     if salt is None:
@@ -215,16 +215,6 @@ def check_global_ip(ip):
             f.write(f"{k} {v}\n")
 
 
-def expand_range(lo, hi):
-    lo = int(lo)
-    hi = int(hi)
-    if hi - lo > 1000:
-        hi = lo + 1000
-    if lo <= hi:
-        return ','.join(str(x) for x in range(lo, hi + 1))
-    return ''
-
-
 def redirect(folder, index_name):
     target = html.escape(f"{folder}/{index_name}", quote=True)
     sys.stdout.write("Status: 303 See Other\r\n")
@@ -256,7 +246,7 @@ def reply_form(res, links=''):
         '</form>'
     )
 
-# ---- 表示・削除処理 -----------------------------------------------------
+# ---- 表示処理 -----------------------------------------------------
 
 def res_view(folder, form):
     """レス表示 (Perl の res サブルーチン相当)"""
@@ -296,76 +286,7 @@ def res_view(folder, form):
             sys.stdout.write(line)
     sys.exit(0)
 
-
-def admin_delete(folder, res, comm):
-    """管理者削除処理"""
-    if not res or not re.match(r'^\d+$', res):
-        sys.stdout.write(HEADER)
-        sys.exit(0)
-
-    file_path = f"./{folder}/{res}.html"
-    if not os.path.exists(file_path):
-        error("スレッドがありません.")
-
-    if not comm:
-        new_file = f"./{folder}/x{res}.html"
-        try:
-            os.rename(file_path, new_file)
-            os.chmod(new_file, 0o600)
-        except OSError:
-            error("スレッドの非表示化に失敗しました.")
-        sys.stdout.write(HEADER)
-        sys.exit(0)
-
-    comm_filter = f",{comm},"
-    comm_filter = re.sub(r'(\d+)\-(\d+)', lambda m: expand_range(m.group(1), m.group(2)), comm_filter)
-    comm_filter = comm_filter.replace('<br>', ',')
-
-    try:
-        with open(file_path, 'r+', encoding='utf-8') as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            orig_mtime = os.fstat(f.fileno()).st_mtime
-            lines = f.readlines()
-            keep = []
-            stamp = None
-
-            for line in lines:
-                m = re.search(r'<dt>(\d+)', line)
-                if m and f",{m.group(1)}," in comm_filter:
-                    continue
-
-                date_m = re.search(r'(\d{4})年(\d{2})月(\d{2})日\([^)]+\)(\d{2})時(\d{2})分(\d{2})秒', line)
-                if date_m:
-                    stamp = [int(x) for x in date_m.groups()]
-                keep.append(line)
-
-            f.seek(0)
-            f.truncate()
-            f.writelines(keep)
-    except OSError:
-        error("削除処理中にファイルエラーが発生しました.")
-
-    ts = orig_mtime
-    if stamp:
-        try:
-            dt = datetime(stamp[0], stamp[1], stamp[2], stamp[3], stamp[4], stamp[5])
-            ts = dt.timestamp()
-        except ValueError:
-            pass
-
-    m_p = re.search(r'p(\d+)', comm_filter)
-    if m_p:
-        ts -= int(m_p.group(1)) * 24 * 60 * 60
-
-    try:
-        os.utime(file_path, (ts + 1, ts + 1))
-        if 'x' in comm_filter:
-            os.chmod(file_path, 0o404)
-    except OSError:
-        pass
-
-    sys.stdout.write(HEADER)
-    sys.exit(0)
+# ---- インデックス再生成 (amezo.py の投稿処理と admin.py の両方から使う) -------------
 
 def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
     """板の index.html (next_int != 21 のときは index2.html) を再生成する。
@@ -666,11 +587,7 @@ def main():
                 key = to_utf8(k_b)
                 value = url_decode(v_b)
                 value = strip_invisible(value)
-
-                # 管理者パスワードのみHTMLエスケープをかけない
-                if key != 'adminpass':
-                    value = html_escape(value)
-
+                value = html_escape(value)
                 value = value.replace('\r\n', '\r').replace('\n', '\r')
                 if key == 'comm':
                     value = value.replace('\r', '<br>')
@@ -690,27 +607,6 @@ def main():
         error('板名が判定できません。')
     if '/' in folder or '..' in folder or not is_board(folder):
         error('板名が不正です')
-
-    # CORS/Origin 検証
-    origin = os.environ.get('HTTP_ORIGIN', '')
-    referer = os.environ.get('HTTP_REFERER', '')
-    http_host = os.environ.get('HTTP_HOST', '')
-    if origin:
-        url_cmp = re.sub(r'^(https?://)www\.', r'\1', URLBASE)
-        ori_cmp = re.sub(r'^(https?://)www\.', r'\1', origin)
-        if not url_cmp.startswith(ori_cmp + '/'):
-            if http_host:
-                clean_host = http_host.split(':')[0]
-                if clean_host not in ori_cmp:
-                    error('不正なリクエストです(Origin不一致)')
-            elif referer:
-                clean_host = http_host.split(':')[0]
-                if clean_host not in referer and URLBASE not in referer:
-                    error('不正なリクエストです(Origin判定不可/Referer不一致)')
-    elif referer and http_host:
-        clean_host = http_host.split(':')[0]
-        if clean_host not in referer and URLBASE not in referer:
-            error('不正なリクエストです(Referer不一致)')
 
     name = form.get('name', '')
     mail = form.get('mail', '')
@@ -776,12 +672,6 @@ def main():
                         subj = re.sub(ng_esc, '', subj)
         except OSError:
             pass
-
-    # 管理者認証 (削除処理を最優先。認証成功で admin_delete へ入り即終了)
-    admin_pass = form.get('adminpass', '')
-    delcrypt = load_delcrypt()
-    if admin_pass and delcrypt and verify_hash(admin_pass, delcrypt):
-        admin_delete(folder, res, comm)
 
     if next_int == 21 and not reload_flag:
         # 管理者名偽装防止
@@ -880,251 +770,9 @@ def main():
         W.close()
         touch_lasttime(folder)
 
-    # blist.txt から板の背景色とタイトル取得
-    color = ""
-    title = ""
-    try:
-        with open('./blist.txt', 'r', encoding='utf-8') as rf:
-            for line in rf:
-                line = line.rstrip('\r\n')
-                if not line:
-                    continue
-                parts = line.split(',')
-                if parts[0] == folder:
-                    color = parts[1] if len(parts) > 1 else ''
-                    title = parts[2] if len(parts) > 2 else ''
-                    break
-    except FileNotFoundError:
-        pass
-
-    page_suffix = '2' if next_int != 21 else ''
-    index_name = f"index{page_suffix}.html"
-    index_path = f"./{folder}/{index_name}"
-    main_title_suffix = "(メイン)" if folder == 'main' else ''
-
-    bg_attr = ""
-    color_parts = color.split('!')
-    color = color_parts[0]
-    if len(color_parts) > 1:
-        bg_attr = f' background="{color_parts[1]}"'
-
-    text_attr = ""
-    if color.endswith('*'):
-        text_attr = ' text="#ffffff" link="red" vlink="orange"'
-        color = color[:-1]
-
-    title = title.replace('#c#', ',')
-    title0 = title
-    m_title = re.search(r'alt="([^"]+)', title0)
-    if m_title:
-        title0 = m_title.group(1)
-        global AMEZO
-        AMEZO = ""
-
-    # キャッシュチェック
-    if next_int == 21 and reload_flag and POST_INTERVAL > 0:
-        try:
-            mtime = os.path.getmtime(index_path)
-            if time.time() - mtime < POST_INTERVAL:
-                redirect(folder, index_name)
-        except OSError:
-            pass
-
-    if next_int != 21 and PAGE_CACHE > 0:
-        try:
-            with open(index_path, 'r', encoding='utf-8') as pf:
-                head = pf.read(4096)
-                m_next = re.search(r'<!-- AMEZO-NEXT (\d+) -->', head)
-                if m_next and int(m_next.group(1)) == next_int:
-                    mtime = os.path.getmtime(index_path)
-                    if time.time() - mtime < PAGE_CACHE:
-                        redirect(folder, index_name)
-        except OSError:
-            pass
-
-    # ロック獲得とインデックス再生成
-    lock_path = f"./{folder}/regen.lock"
-    try:
-        lk_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o644)
-        LK = os.fdopen(lk_fd, 'w')
-    except OSError:
-        error("ロックファイルを作成できません.")
-
-    locked = False
-    if next_int == 21 and not reload_flag:
-        # ブロッキングロック (CGIタイムアウトを考慮し最大10秒)
-        for _ in range(100):
-            try:
-                fcntl.flock(LK, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                locked = True
-                break
-            except BlockingIOError:
-                time.sleep(0.1)
-    else:
-        try:
-            fcntl.flock(LK, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            locked = True
-        except BlockingIOError:
-            pass
-
-    if not locked:
-        LK.close()
-        redirect(folder, index_name)
-
-    tmp_path = f"{index_path}.tmp{os.getpid()}"
-    try:
-        W = open(tmp_path, 'w', encoding='utf-8')
-    except OSError:
-        LK.close()
-        error("indexを書き込めません.")
-
-    W.write(
-        f'<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">\n'
-        f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-        f'<link rel="stylesheet" href="../style.css">\n'
-        f'<title>{title0}{AMEZO}{main_title_suffix}</title></head>\n'
-        f'{COPYRIGHT}\n'
-        f'<!-- AMEZO-NEXT {next_int} -->\n'
-        f'<body{bg_attr} bgcolor="{color}"{text_attr}>\n'
-        f'<font size=+2>{title}{AMEZO}{main_title_suffix}</font>\n'
-    )
-
-    if os.path.exists('./header.html'):
-        try:
-            with open('./header.html', 'r', encoding='utf-8') as hf:
-                W.write(hf.read())
-        except OSError:
-            pass
-
-    W.write(
-        f'<form method=post action="../amezo.cgi">\n'
-        f'<input type=submit value="次のページ">\n'
-        f'<input type=text name="next" value="{next_int}" size="3">〜</form>\n'
-        f'<font size=2>\n<!-- HEAD LINE -->\n'
-    )
-
-    # ディレクトリ走査してヘッドラインをソート生成
-    files = []
-    try:
-        for f_name in os.listdir(f"./{folder}"):
-            if re.match(r'^\d+\.html$', f_name):
-                try:
-                    mtime = int(os.path.getmtime(f"./{folder}/{f_name}"))
-                except OSError:
-                    mtime = 0
-                files.append((f"{mtime:011d}", f_name))
-    except OSError:
-        pass
-
-    files.sort(key=lambda x: x[0], reverse=True)
-
-    # 古いスレッドを退避 (oスレッドID.html)
-    if MAX_THREADS > 0:
-        n_thr = 0
-        filtered_files = []
-        for ts, f_name in files:
-            n_thr += 1
-            if n_thr > MAX_THREADS:
-                if not os.path.exists(f"./{folder}/o{f_name}"):
-                    try:
-                        os.rename(f"./{folder}/{f_name}", f"./{folder}/o{f_name}")
-                    except OSError:
-                        pass
-            else:
-                filtered_files.append((ts, f_name))
-        files = filtered_files
-
-    start_idx = next_int - 21
-    for i in range(start_idx, start_idx + 100):
-        if i >= len(files):
-            break
-        ts, f_name = files[i]
-        ttl = ""
-        try:
-            with open(f"./{folder}/{f_name}", 'r', encoding='utf-8') as rf:
-                first_line = rf.readline()
-                m_ttl = re.search(r'<b>([^<]*)</b>', first_line)
-                if m_ttl:
-                    ttl = m_ttl.group(1)
-        except OSError:
-            pass
-        W.write(f' {i+1}<a href="{f_name}">{ttl}</a>\n')
-
-    W.write("<!-- HEAD LINE END -->\n</font>\n")
-
-    # 各スレッドの内容表示
-    for i in range(start_idx, next_int - 1):
-        if i >= len(files):
-            break
-        ts, f_name = files[i]
-        W.write('<table border=1 cellspacing=1 cellpadding=2 width=100% bgcolor="#efefef"><tr><td><font color="#000000">\n')
-
-        lines = []
-        try:
-            with open(f"./{folder}/{f_name}", 'r', encoding='utf-8') as rf:
-                first_line = rf.readline()
-                # スレッドの先頭行から html/head/body/meta/title/link を削って出力
-                first_line = re.sub(r'</?(?:html|head|body)[^>]*>', '', first_line)
-                first_line = re.sub(r'<(?:meta|link)[^>]*>', '', first_line)
-                first_line = re.sub(r'<title>.*?</title>', '', first_line)
-                W.write(first_line)
-
-                for line in rf:
-                    if line.startswith('<form'):
-                        break
-                    lines.append(line)
-        except OSError:
-            pass
-
-        # 最初の1レスと最後の7レスのみを抜粋して表示
-        k = len(lines) - 7
-        if k < 0:
-            k = 0
-        for m in range(k, len(lines)):
-            W.write(lines[m])
-
-        res_id = f_name.replace('.html', '')
-        sub_tag = ""
-        if len(lines) > 200:
-            k_idx = len(lines) - 98
-            sub_tag = (f'<input type=text name="from" value="{k_idx}" size="4">'
-                       '<input type=submit name="sub" value="〜"> ')
-
-        links = (f'<div class="row links"><a href="{res_id}.html">レス全部を見る</a> '
-                 f'{sub_tag}<a href="#top">上へ</a> <a href="./">リロード</a></div>')
-
-        W.write('</font></td></tr></table>\n' + reply_form(res_id, links) + '<hr>\n')
-
-    W.write(
-        f'<form method=post action="../amezo.cgi">\n'
-        f'<input type=submit value="次のページ">\n'
-        f'<input type=text name="next" value="{next_int}" size="3">〜</form>\n'
-        f'<hr></body></html>\n'
-    )
-    W.close()
-
-    # 元の index ファイルに置き換え
-    try:
-        if os.path.exists(index_path):
-            orig_mode = os.stat(index_path).st_mode & 0o7777
-        else:
-            orig_mode = 0o644
-        os.chmod(tmp_path, orig_mode)
-        os.replace(tmp_path, index_path)
-    except OSError:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        error("indexを更新できません.")
-
-    try:
-        fcntl.flock(LK, fcntl.LOCK_UN)
-        LK.close()
-    except OSError:
-        pass
-
+    index_name, _ = regen_index(folder, next_int, reload_flag)
     redirect(folder, index_name)
+
 
 if __name__ == '__main__':
     main()
