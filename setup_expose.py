@@ -28,7 +28,7 @@ MAX_POST_BYTES = 64 * 1024
 
 # CGI として実行するスクリプト名 (拡張子なし)。None なら ./ 内の .cgi/.py を全て実行する
 # (None だと /server.py のような URL でサーバー自身が再起動されるので注意)
-ALLOWED_CGI = {"amezo", "dai"}
+ALLOWED_CGI = {"amezo", "dai", "admin"}
 
 # 板フォルダの外で配信を許可するパス
 STATIC_ROOT_FILES = {"/", "/index.html", "/style.css"}
@@ -57,7 +57,7 @@ def load_boards():
 def setup_bbs_directories():
     print("📂 BBS用のディレクトリとパーミッションを設定しています...")
 
-    for cgi_script in ["amezo.py", "dai.py"]:
+    for cgi_script in ["amezo.py", "dai.py", "admin.py"]:
         if os.path.exists(cgi_script):
             os.chmod(cgi_script, 0o755)
             print(f"  - 実行権限付与: {cgi_script}")
