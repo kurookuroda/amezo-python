@@ -607,7 +607,29 @@ def main():
         error('板名が判定できません。')
     if '/' in folder or '..' in folder or not is_board(folder):
         error('板名が不正です')
-
+    
+    
+    # CORS/Origin 検証 (一時的に無効化)
+    # origin = os.environ.get('HTTP_ORIGIN', '')
+    # referer = os.environ.get('HTTP_REFERER', '')
+    # http_host = os.environ.get('HTTP_HOST', '')
+    # if origin:
+    #     url_cmp = re.sub(r'^(https?://)www\.', r'\1', URLBASE)
+    #     ori_cmp = re.sub(r'^(https?://)www\.', r'\1', origin)
+    #     if not url_cmp.startswith(ori_cmp + '/'):
+    #         if http_host:
+    #             clean_host = http_host.split(':')[0]
+    #             if clean_host not in ori_cmp:
+    #                 error('不正なリクエストです(Origin不一致)')
+    #         elif referer:
+    #             clean_host = http_host.split(':')[0]
+    #             if clean_host not in referer and URLBASE not in referer:
+    #                 error('不正なリクエストです(Origin判定不可/Referer不一致)')
+    # elif referer and http_host:
+    #     clean_host = http_host.split(':')[0]
+    #     if clean_host not in referer and URLBASE not in referer:
+    #         error('不正なリクエストです(Referer不一致)')
+    
     name = form.get('name', '')
     mail = form.get('mail', '')
     comm = form.get('comm', '')
