@@ -12,6 +12,7 @@ import hmac
 import urllib.parse
 import html
 import hashlib
+import base64
 from datetime import datetime
 
 # スクリプトのあるディレクトリに固定
@@ -59,6 +60,16 @@ DELCRYPTFILE = 'delpass.txt'
 
 HASH_SCHEME = 'pbkdf2_sha256'
 HASH_ITERATIONS = 100000
+
+# ---- トリップ / キャップ ------------------------------------------------------
+# 名前欄に「名前#パスワード」と書くと、名前の後ろに ◆ と10文字を付ける。
+# 同じパスワードなら同じ10文字になる。計算には trip_secret.txt の秘密鍵を使い、
+# このファイルが無くなると (クローンし直したときなど) 全員のトリップが変わる。
+TRIP_SECRET_FILE = 'trip_secret.txt'
+TRIP_PASS_MAX = 100        # パスワードの最大文字数 (超えた分は無視)
+TRIP_MARK = '◆'            # トリップの印 (名前に直接書かれたら ◇ に置き換える)
+CAP_MARK = '★'             # キャップの印 (名前に直接書かれたら ☆ に置き換える)
+CAP_FILE = 'cap.txt'       # 1行: 表示名,パスワードのハッシュ (amezo.py --make-hash で作る)
 
 HEADER = "Content-type: text/html; charset=UTF-8\r\n\r\n"
 
@@ -155,6 +166,81 @@ def verify_hash(password, stored):
         return False
     dk = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, iters)
     return hmac.compare_digest(dk, expected)
+
+
+# ---- トリップ / キャップ -----------------------------------------------------
+
+def load_trip_secret():
+    """トリップ用の秘密鍵 (32バイト)。無ければ作る。
+    同時に作られても、最初に置かれた鍵が全員に使われるよう os.link で置く。"""
+    def read_key():
+        try:
+            with open(TRIP_SECRET_FILE, 'r', encoding='ascii') as f:
+                s = f.read().strip()
+            if re.fullmatch(r'[0-9a-f]{64}', s):
+                return bytes.fromhex(s)
+        except (OSError, UnicodeDecodeError):
+            pass
+        return None
+
+    key = read_key()
+    if key:
+        return key
+    key = os.urandom(32)
+    tmp = f"{TRIP_SECRET_FILE}.tmp{os.getpid()}"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'w', encoding='ascii') as w:
+            w.write(key.hex() + '\n')
+        try:
+            os.link(tmp, TRIP_SECRET_FILE)
+        except FileExistsError:
+            other = read_key()
+            if other:
+                return other
+            os.replace(tmp, TRIP_SECRET_FILE)      # 壊れた鍵ファイルは置き換える
+    except OSError:
+        pass                                       # 置けなくても、この投稿には使える
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return read_key() or key
+
+
+def clean_trip_password(password):
+    """空白を除き、全角の英数字・記号を半角にそろえ、長さを制限する"""
+    pw = re.sub(r' |　', '', password)
+    pw = ''.join(chr(ord(c) - 0xFEE0) if '\uff01' <= c <= '\uff5e' else c for c in pw)
+    return pw[:TRIP_PASS_MAX]
+
+
+def make_trip(password):
+    """パスワードからトリップの10文字を作る。パスワードが空なら ''"""
+    pw = clean_trip_password(password)
+    if not pw:
+        return ''
+    digest = hmac.new(load_trip_secret(), pw.encode('utf-8'), hashlib.sha256).digest()
+    return base64.b64encode(digest).decode('ascii')[:10].replace('+', '.').replace('/', '_')
+
+
+def is_cap(name_escaped, password):
+    """名前とパスワードが cap.txt の組と一致するか (名前が一致したときだけ重い計算をする)"""
+    if not password:
+        return False
+    try:
+        with open(CAP_FILE, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.rstrip('\r\n')
+                if not line or line.startswith('#') or ',' not in line:
+                    continue
+                cap_name, _, stored = line.rpartition(',')
+                if html_escape(cap_name) == name_escaped and verify_hash(password, stored):
+                    return True
+    except OSError:
+        pass
+    return False
 
 
 def load_delcrypt():
@@ -653,6 +739,7 @@ def main():
                 query_params[k] = url_decode(v)
 
     form = {}
+    trip_pw = ''        # 名前欄の「#」より後ろ (エスケープ前のまま。保存も表示もしない)
     if buffer:
         for pair in buffer.split(b'&'):
             if b'=' in pair:
@@ -660,6 +747,10 @@ def main():
                 key = to_utf8(k_b)
                 value = url_decode(v_b)
                 value = strip_invisible(value)
+                if key == 'name':
+                    # 最初の半角 # で、名前とパスワードに分ける (全角の ＃ は区切りにしない)
+                    value, _, pw_part = value.partition('#')
+                    trip_pw = re.sub(r'[\x00-\x1f]', '', pw_part)
                 value = html_escape(value)
                 value = value.replace('\r\n', '\r').replace('\n', '\r')
                 if key == 'comm':
@@ -741,6 +832,7 @@ def main():
     if html_chars_len(subj) > SUBJ_MAX:
         error('題名が長すぎます')
 
+    name = name.replace(TRIP_MARK, '◇').replace(CAP_MARK, '☆')   # トリップ・キャップの偽造防止
     name = re.sub(r' |　|\u200D', '', name)
     name = ccut(name, NAME_MAX)
     comm = re.sub(r'&gt;(&gt;)+', '&gt;', comm)
@@ -775,9 +867,13 @@ def main():
             pass
 
     if next_int == 21 and not reload_flag:
+        # キャップ (cap.txt の名前とパスワードに一致したとき) は、管理者名の置き換えをしない
+        cap_ok = is_cap(name, trip_pw)
+
         # 管理者名偽装防止
-        admin_pat = re.escape(ADMIN)
-        name = re.sub(admin_pat, f"＃{ADMIN}", name)
+        if not cap_ok:
+            admin_pat = re.escape(ADMIN)
+            name = re.sub(admin_pat, f"＃{ADMIN}", name)
 
         if res:
             subj = ''
@@ -797,6 +893,12 @@ def main():
             check_global_ip(client_ip())
 
         comm = re.sub(r'(https?\:[\w\.\~\-\/\?\+\=\:\@\%\;\#\&]+)', url_link, comm)
+        if cap_ok:
+            name += CAP_MARK
+        else:
+            trip = make_trip(trip_pw)
+            if trip:
+                name += TRIP_MARK + trip
         if mail:
             name = f'<a href="mailto:{mail} ">{name} </a>'
 
