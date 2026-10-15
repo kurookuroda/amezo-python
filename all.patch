@@ -1,0 +1,295 @@
+diff --git a/README.md b/README.md
+index 77ad167..1949121 100644
+--- a/README.md
++++ b/README.md
+@@ -26,6 +26,8 @@ Origin/Referer の検証は、コメントアウトで無効になっている
+ | `admin_fail.mem` | 管理画面のログイン失敗の記録 (IP、回数、時刻) |
+ | `板/数字.html` | スレッド (数字は作成日時 `yyMMddHHmmss`) |
+ | `板/x数字.html` | 非表示にしたスレッド |
++| `板/o数字.html` | 古くなって退避されたスレッド (過去ログ)。`MAX_THREADS` を超えた分が、先頭に `o` を付けて改名される |
++| `板/kako.html` | 過去ログの一覧。新しく退避したときに作り直す |
+ | `板/index.html`、`index2.html` | 再生成される板の一覧ページ (1ページ目、2ページ目以降) |
+ | `板/lasttime.txt`、`regen.lock` | 連投制限用の時刻、再生成の排他ロック |
+ 
+@@ -38,7 +40,7 @@ Origin/Referer の検証は、コメントアウトで無効になっている
+ 
+ **リクエストの振り分け**
+ - `/amezo.cgi`、`/amezo.py`、`/dai.cgi`、`/admin.cgi` などは、CGI として実行します。実行できるのは `ALLOWED_CGI` の3つだけです。環境変数 (`REQUEST_METHOD`、`QUERY_STRING`、`REMOTE_ADDR`、`HTTP_*` など) を渡し、標準入力に POST を渡して、30 秒で打ち切ります。POST は 64KB を超えると 413 を返します。
+-- それ以外は**許可リスト方式の静的配信**です。許可するのは、`/`、`/index.html`、`/style.css`、`blist.txt` にある板の `index.html`、`index2.html`、`数字.html` だけです。`delpass.txt` や `x〜.html`、ソースファイルは 404 を返し、ディレクトリの一覧も出しません。
++- それ以外は**許可リスト方式の静的配信**です。許可するのは、`/`、`/index.html`、`/style.css`、`blist.txt` にある板の `index.html`、`index2.html`、`数字.html`、過去ログの `o数字.html` と `kako.html` だけです。`delpass.txt` や `x〜.html`、ソースファイルは 404 を返し、ディレクトリの一覧も出しません。
+ 
+ ## 4. 画面の構成
+ 
+@@ -48,10 +50,10 @@ Origin/Referer の検証は、コメントアウトで無効になっている
+ 
+ ## 5. 投稿の流れ (`amezo.py`)
+ 
+-1. **受け取り**: 7500 バイトを超える内容は拒否します。フォームの値は、見えない文字を除去し、HTML エスケープし、本文の改行は `<br>` に変えます。
++1. **受け取り**: 送信が 7500 バイト (`MAX_POST_BYTES`) を超える内容と、`CONTENT_LENGTH` が負の値のものは拒否します。フォームの値は、見えない文字を除去し、HTML エスケープし、本文の改行は `<br>` に変えます。
+ 2. **板の判定**: `folder` が無ければ Referer のパスから取り出します。`blist.txt` に無い板、`/` や `..` を含む名前は拒否します。
+ 3. **再読み込み扱い**: 3つの入力欄がすべて空、`name`/`subj`/`comm` が同じ値、または NG ワード (`n`/`c`) に当たった場合は、投稿せず、ページの再生成だけを行います。「次のページ」の操作もこの扱いです。
+-4. **入力の検査**: 改行 20 個まで、題名 20 文字まで、投稿者名 30 文字まで。名前の空白は除去し、`ng.txt` の削除ワードを取り除きます。管理者名「サポート」を名乗る投稿は、`＃サポート` に変えます。
++4. **入力の検査**: 改行 20 個まで、題名 45 文字まで、本文 400 文字まで、メール 50 文字まででエラーにし、投稿者名は 25 文字を超えた分を切り捨てます。文字数は、全角・半角・絵文字を区別せず1文字と数え (`&amp;` などのエスケープも1文字、本文の改行も1文字)、題名と名前は空白を除いた文字数です。上限は `amezo.py` の `SUBJ_MAX`、`NAME_MAX`、`MAIL_MAX`、`COMM_MAX` で変えられます。名前の空白は除去し、`ng.txt` の削除ワードを取り除きます。管理者名「サポート」を名乗る投稿は、`＃サポート` に変えます。
+ 5. **制限**: 同じ板で 5 秒以内の連投は拒否します (`lasttime.txt`)。新規スレッドは、同じ IP から 180 秒に 1 回だけです (`global.mem`)。
+ 6. **書き込み**:
+    - 新規スレッドは、`yyMMddHHmmss` のファイルを `O_EXCL` で作ります。重複したら番号を足して、30 回まで試します。
+@@ -73,6 +75,7 @@ Origin/Referer の検証は、コメントアウトで無効になっている
+ - `regen.lock` で排他制御をします。投稿のときは最大 10 秒待ち、再読み込みのときは、取れなければ作り直しを諦めます。
+ - 一時ファイルに書き出してから `os.replace` で入れ替えるので、閲覧中に壊れたページが見えることはありません。
+ - スレッドは、**更新日時の新しい順**に並びます。返信されたスレッドは、先頭に来ます。
++- **過去ログ**: `MAX_THREADS` (初期値 200) を超えた古いスレッドは、`数字.html` を `o数字.html` に改名して退避します (0 なら退避しません)。退避が起きると、題名の一覧 `kako.html` を作り直し、板のページに「過去ログ」へのリンクを出します。過去ログへの返信は受け付けず、「過去ログになったため返信できません」と表示します。復元するには、サーバー上で `o` を外して改名します。
+ - 2 ページ目以降は、`index2.html` を共用して上書きし、`<!-- AMEZO-NEXT 数字 -->` というコメントで、どのページを作ったかを区別します。
+ 
+ ## 8. 管理画面 (`admin.py`)
+diff --git a/amezo.py b/amezo.py
+index e76c6d9..5f74be5 100644
+--- a/amezo.py
++++ b/amezo.py
+@@ -41,7 +41,18 @@ URLBASE = 'http://ame.x0.com/'
+ ADMIN = 'サポート'
+ 
+ POST_INTERVAL = 5
+-MAX_THREADS = 0
++MAX_THREADS = 200          # この数を超えた古いスレッドは o数字.html に退避 (0 なら退避しない)
++KAKO_FILE = 'kako.html'    # 退避したスレッド(過去ログ)の一覧ページ
++
++# ---- 入力の長さの上限 -----------------------------------------------------
++# 文字数は「見た目の文字数」: 全角も半角も絵文字も1文字、&amp; などのエスケープも1文字、
++# 本文の改行も1文字として数える。
++MAX_POST_BYTES = 7500      # 送信全体の上限 (荒らし対策。送信形式の長さなので内容の上限ではない)
++SUBJ_MAX = 45              # 題名     超えたらエラー (空白を除いた文字数)
++NAME_MAX = 25              # 名前     超えたら切り捨て (空白を除いた文字数)
++MAIL_MAX = 50              # メール   超えたらエラー
++COMM_MAX = 400             # 本文     超えたらエラー
++COMM_LINES_MAX = 20        # 本文の改行の数
+ PAGE_CACHE = 10
+ TRUSTED_PROXIES = ['127.0.0.1', '::1']
+ DELCRYPTFILE = 'delpass.txt'
+@@ -215,6 +226,13 @@ def check_global_ip(ip):
+             f.write(f"{k} {v}\n")
+ 
+ 
++def thread_missing(folder, res, verb):
++    """スレッドが見つからないとき。過去ログに退避済みなら、その旨を知らせる"""
++    if re.match(r'^\d+$', res) and os.path.exists(f'./{folder}/o{res}.html'):
++        error(f'このスレッドは過去ログになったため{verb}できません.')
++    error('スレッドがありません.')
++
++
+ def redirect(folder, index_name):
+     target = html.escape(f"{folder}/{index_name}", quote=True)
+     sys.stdout.write("Status: 303 See Other\r\n")
+@@ -239,8 +257,8 @@ def reply_form(res, links=''):
+         '<form method=post action="../amezo.cgi" class="post">'
+         f'<input type=hidden name="res" value="{res}">'
+         '<div class="row">投稿者 <input type=text name="name" size=20> '
+-        'メール <input type=text name="mail" size=20></div>'
+-        '<textarea name="comm" rows=4 cols=70></textarea>'
++        'メール <input type=text name="mail" size=20 maxlength=50></div>'
++        '<textarea name="comm" rows=4 cols=70 maxlength=400></textarea>'
+         '<div class="row"><input type=submit value="↑へのレスカキコ"></div>'
+         f'{links}'
+         '</form>'
+@@ -262,7 +280,7 @@ def res_view(folder, form):
+ 
+     file_path = f"./{folder}/{res}.html"
+     if not os.path.exists(file_path):
+-        error('スレッドがありません.')
++        thread_missing(folder, res, '表示')
+ 
+     sys.stdout.write("Content-type: text/html; charset=UTF-8\r\n\r\n")
+     with open(file_path, 'r', encoding='utf-8') as rf:
+@@ -286,6 +304,47 @@ def res_view(folder, form):
+             sys.stdout.write(line)
+     sys.exit(0)
+ 
++# ---- 過去ログ一覧 -----------------------------------------------------
++
++def write_kako(folder, old_files, body_tag, title0, amezo_name, main_title_suffix, title):
++    """退避したスレッド (o数字.html) の一覧 板/kako.html を作る。
++    old_files: [(更新時刻の文字列, 'o数字.html'), ...]
++    失敗しても投稿処理は止めない (一覧が古いままになるだけ)。"""
++    old_files = sorted(old_files, key=lambda x: (x[0], x[1]), reverse=True)
++    kako_path = f"./{folder}/{KAKO_FILE}"
++    tmp_path = f"{kako_path}.tmp{os.getpid()}"
++    try:
++        with open(tmp_path, 'w', encoding='utf-8') as W:
++            W.write(
++                f'<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">\n'
++                f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
++                f'<link rel="stylesheet" href="../style.css">\n'
++                f'<title>{title0}{amezo_name}{main_title_suffix} 過去ログ</title></head>\n'
++                f'{COPYRIGHT}\n'
++                f'{body_tag}\n'
++                f'<font size=+2>{title}{amezo_name}{main_title_suffix} 過去ログ</font>\n'
++                f'<div class="row links"><a href="./">板へ戻る</a></div>\n'
++                f'<font size=2>\n'
++            )
++            for i, (ts, f_name) in enumerate(old_files, 1):
++                ttl = ""
++                try:
++                    with open(f"./{folder}/{f_name}", 'r', encoding='utf-8') as rf:
++                        m_ttl = re.search(r'<b>([^<]*)</b>', rf.readline())
++                        if m_ttl:
++                            ttl = m_ttl.group(1)
++                except OSError:
++                    pass
++                W.write(f' {i}<a href="{f_name}">{ttl}</a>\n')
++            W.write('</font>\n<hr></body></html>\n')
++        os.chmod(tmp_path, 0o644)
++        os.replace(tmp_path, kako_path)
++    except OSError:
++        try:
++            os.unlink(tmp_path)
++        except OSError:
++            pass
++
+ # ---- インデックス再生成 (amezo.py の投稿処理と admin.py の両方から使う) -------------
+ 
+ def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
+@@ -421,14 +480,17 @@ def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
+ 
+     # ディレクトリ走査してヘッドラインをソート生成
+     files = []
++    old_files = []      # 退避済み (o数字.html) のスレッド = 過去ログ
++    retired = False     # 今回の再生成で新しく退避したか
+     try:
+         for f_name in os.listdir(f"./{folder}"):
+-            if re.match(r'^\d+\.html$', f_name):
++            is_live = re.match(r'^\d+\.html$', f_name)
++            if is_live or re.match(r'^o\d+\.html$', f_name):
+                 try:
+                     mtime = int(os.path.getmtime(f"./{folder}/{f_name}"))
+                 except OSError:
+                     mtime = 0
+-                files.append((f"{mtime:011d}", f_name))
++                (files if is_live else old_files).append((f"{mtime:011d}", f_name))
+     except OSError:
+         pass
+ 
+@@ -444,6 +506,8 @@ def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
+                 if not os.path.exists(f"./{folder}/o{f_name}"):
+                     try:
+                         os.rename(f"./{folder}/{f_name}", f"./{folder}/o{f_name}")
++                        old_files.append((ts, f"o{f_name}"))
++                        retired = True
+                     except OSError:
+                         pass
+             else:
+@@ -467,6 +531,8 @@ def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
+         W.write(f' {i+1}<a href="{f_name}">{ttl}</a>\n')
+ 
+     W.write("<!-- HEAD LINE END -->\n</font>\n")
++    if old_files:
++        W.write(f'<div class="row links"><a href="{KAKO_FILE}">過去ログ</a></div>\n')
+ 
+     # 各スレッドの内容表示
+     for i in range(start_idx, next_int - 1):
+@@ -534,6 +600,11 @@ def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
+             pass
+         error("indexを更新できません.")
+ 
++    # 過去ログ一覧: 新しく退避したとき、または一覧がまだ無いときだけ作り直す
++    if old_files and (retired or not os.path.exists(f"./{folder}/{KAKO_FILE}")):
++        write_kako(folder, old_files, f'<body{bg_attr} bgcolor="{color}"{text_attr}>',
++                   title0, amezo_name, main_title_suffix, title)
++
+     try:
+         fcntl.flock(LK, fcntl.LOCK_UN)
+         LK.close()
+@@ -560,7 +631,9 @@ def main():
+     except ValueError:
+         pass
+ 
+-    if content_len > 7500:
++    if content_len < 0:
++        error('投稿内容が不正です')
++    if content_len > MAX_POST_BYTES:
+         error('投稿内容が大きすぎます')
+ 
+     try:
+@@ -568,7 +641,7 @@ def main():
+     except Exception:
+         buffer = b''
+ 
+-    if len(buffer) > 7500:
++    if len(buffer) > MAX_POST_BYTES:
+         error('投稿内容が大きすぎます')
+ 
+     query_params = {}
+@@ -656,15 +729,21 @@ def main():
+     if not name and not subj and not comm:
+         reload_flag = True
+ 
+-    if comm.count('<br>') > 20:
++    if comm.count('<br>') > COMM_LINES_MAX:
+         error('改行が多すぎます')
+-    if html_chars_len(subj) > 20:
++    # 本文の改行 (<br>) は1文字として数える
++    if html_chars_len(comm.replace('<br>', '\n')) > COMM_MAX:
++        error('コメントが長すぎます')
++    if html_chars_len(mail) > MAIL_MAX:
++        error('メールが長すぎます')
++
++    subj = re.sub(r' |　|＿', '', subj)
++    if html_chars_len(subj) > SUBJ_MAX:
+         error('題名が長すぎます')
+ 
+     name = re.sub(r' |　|\u200D', '', name)
+-    name = ccut(name, 30)
++    name = ccut(name, NAME_MAX)
+     comm = re.sub(r'&gt;(&gt;)+', '&gt;', comm)
+-    subj = re.sub(r' |　|＿', '', subj)
+ 
+     # NGワードチェック用の元メッセージデコード
+     comm2 = comm
+@@ -747,7 +826,7 @@ def main():
+             try:
+                 W = open(file_path, 'r+', encoding='utf-8')
+             except FileNotFoundError:
+-                error('スレッドがありません.')
++                thread_missing(folder, res, '返信')
+ 
+         fcntl.flock(W, fcntl.LOCK_EX)
+         cnt = 0
+diff --git a/header.html b/header.html
+index 448b9ff..f7cc38b 100644
+--- a/header.html
++++ b/header.html
+@@ -15,8 +15,8 @@
+ </div>
+ 
+ <form method=post action="../amezo.cgi" class="post">
+-<div class="row">題名 <input type=text name="subj" maxlength=20 size=30></div>
+-<div class="row">投稿者 <input type=text name="name" size=20> メール <input type=text name="mail" size=20></div>
+-<textarea name="comm" rows=5 cols=70></textarea>
++<div class="row">題名 <input type=text name="subj" maxlength=45 size=30></div>
++<div class="row">投稿者 <input type=text name="name" size=20> メール <input type=text name="mail" size=20 maxlength=50></div>
++<textarea name="comm" rows=5 cols=70 maxlength=400></textarea>
+ <div class="row"><input type=submit value="新規投稿"> <a href="./">リロード</a></div>
+ </form>
+diff --git a/setup_expose.py b/setup_expose.py
+index c2e7620..f3cde18 100644
+--- a/setup_expose.py
++++ b/setup_expose.py
+@@ -33,8 +33,9 @@ ALLOWED_CGI = {"amezo", "dai", "admin"}
+ # 板フォルダの外で配信を許可するパス
+ STATIC_ROOT_FILES = {"/", "/index.html", "/style.css"}
+ 
+-# 板フォルダの中で配信を許可するファイル名 (x〜.html / o〜.html は含まない)
+-BOARD_FILE_RE = r'(?:index2?|\d+)\.html'
++# 板フォルダの中で配信を許可するファイル名
++# (o数字.html は退避した過去ログ、kako.html はその一覧。x〜.html は含まない)
++BOARD_FILE_RE = r'(?:index2?|kako|o?\d+)\.html'
+ 
+ DEFAULT_BOARDS = ["main", "zatsu", "test"]
+ 
+@@ -141,7 +142,7 @@ class MyCGIHandler(SimpleHTTPRequestHandler):
+         if path in STATIC_ROOT_FILES:
+             return True
+ 
+-        # /板名  /板名/  /板名/index.html  /板名/index2.html  /板名/数字.html
++        # /板名  /板名/  /板名/index.html  /板名/index2.html  /板名/数字.html  /板名/o数字.html  /板名/kako.html
+         m = re.fullmatch(r'/([^/\\]+)(?:/(?:' + BOARD_FILE_RE + r')?)?', path)
+         if not m:
+             return False

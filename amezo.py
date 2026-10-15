@@ -41,7 +41,18 @@ URLBASE = 'http://ame.x0.com/'
 ADMIN = 'サポート'
 
 POST_INTERVAL = 5
-MAX_THREADS = 0
+MAX_THREADS = 200          # この数を超えた古いスレッドは o数字.html に退避 (0 なら退避しない)
+KAKO_FILE = 'kako.html'    # 退避したスレッド(過去ログ)の一覧ページ
+
+# ---- 入力の長さの上限 -----------------------------------------------------
+# 文字数は「見た目の文字数」: 全角も半角も絵文字も1文字、&amp; などのエスケープも1文字、
+# 本文の改行も1文字として数える。
+MAX_POST_BYTES = 7500      # 送信全体の上限 (荒らし対策。送信形式の長さなので内容の上限ではない)
+SUBJ_MAX = 45              # 題名     超えたらエラー (空白を除いた文字数)
+NAME_MAX = 25              # 名前     超えたら切り捨て (空白を除いた文字数)
+MAIL_MAX = 50              # メール   超えたらエラー
+COMM_MAX = 400             # 本文     超えたらエラー
+COMM_LINES_MAX = 20        # 本文の改行の数
 PAGE_CACHE = 10
 TRUSTED_PROXIES = ['127.0.0.1', '::1']
 DELCRYPTFILE = 'delpass.txt'
@@ -215,6 +226,13 @@ def check_global_ip(ip):
             f.write(f"{k} {v}\n")
 
 
+def thread_missing(folder, res, verb):
+    """スレッドが見つからないとき。過去ログに退避済みなら、その旨を知らせる"""
+    if re.match(r'^\d+$', res) and os.path.exists(f'./{folder}/o{res}.html'):
+        error(f'このスレッドは過去ログになったため{verb}できません.')
+    error('スレッドがありません.')
+
+
 def redirect(folder, index_name):
     target = html.escape(f"{folder}/{index_name}", quote=True)
     sys.stdout.write("Status: 303 See Other\r\n")
@@ -239,8 +257,8 @@ def reply_form(res, links=''):
         '<form method=post action="../amezo.cgi" class="post">'
         f'<input type=hidden name="res" value="{res}">'
         '<div class="row">投稿者 <input type=text name="name" size=20> '
-        'メール <input type=text name="mail" size=20></div>'
-        '<textarea name="comm" rows=4 cols=70></textarea>'
+        'メール <input type=text name="mail" size=20 maxlength=50></div>'
+        '<textarea name="comm" rows=4 cols=70 maxlength=400></textarea>'
         '<div class="row"><input type=submit value="↑へのレスカキコ"></div>'
         f'{links}'
         '</form>'
@@ -262,7 +280,7 @@ def res_view(folder, form):
 
     file_path = f"./{folder}/{res}.html"
     if not os.path.exists(file_path):
-        error('スレッドがありません.')
+        thread_missing(folder, res, '表示')
 
     sys.stdout.write("Content-type: text/html; charset=UTF-8\r\n\r\n")
     with open(file_path, 'r', encoding='utf-8') as rf:
@@ -285,6 +303,47 @@ def res_view(folder, form):
                 line = line.replace('</form>', f'{fol_tag}</form>')
             sys.stdout.write(line)
     sys.exit(0)
+
+# ---- 過去ログ一覧 -----------------------------------------------------
+
+def write_kako(folder, old_files, body_tag, title0, amezo_name, main_title_suffix, title):
+    """退避したスレッド (o数字.html) の一覧 板/kako.html を作る。
+    old_files: [(更新時刻の文字列, 'o数字.html'), ...]
+    失敗しても投稿処理は止めない (一覧が古いままになるだけ)。"""
+    old_files = sorted(old_files, key=lambda x: (x[0], x[1]), reverse=True)
+    kako_path = f"./{folder}/{KAKO_FILE}"
+    tmp_path = f"{kako_path}.tmp{os.getpid()}"
+    try:
+        with open(tmp_path, 'w', encoding='utf-8') as W:
+            W.write(
+                f'<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">\n'
+                f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+                f'<link rel="stylesheet" href="../style.css">\n'
+                f'<title>{title0}{amezo_name}{main_title_suffix} 過去ログ</title></head>\n'
+                f'{COPYRIGHT}\n'
+                f'{body_tag}\n'
+                f'<font size=+2>{title}{amezo_name}{main_title_suffix} 過去ログ</font>\n'
+                f'<div class="row links"><a href="./">板へ戻る</a></div>\n'
+                f'<font size=2>\n'
+            )
+            for i, (ts, f_name) in enumerate(old_files, 1):
+                ttl = ""
+                try:
+                    with open(f"./{folder}/{f_name}", 'r', encoding='utf-8') as rf:
+                        m_ttl = re.search(r'<b>([^<]*)</b>', rf.readline())
+                        if m_ttl:
+                            ttl = m_ttl.group(1)
+                except OSError:
+                    pass
+                W.write(f' {i}<a href="{f_name}">{ttl}</a>\n')
+            W.write('</font>\n<hr></body></html>\n')
+        os.chmod(tmp_path, 0o644)
+        os.replace(tmp_path, kako_path)
+    except OSError:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 # ---- インデックス再生成 (amezo.py の投稿処理と admin.py の両方から使う) -------------
 
@@ -421,14 +480,17 @@ def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
 
     # ディレクトリ走査してヘッドラインをソート生成
     files = []
+    old_files = []      # 退避済み (o数字.html) のスレッド = 過去ログ
+    retired = False     # 今回の再生成で新しく退避したか
     try:
         for f_name in os.listdir(f"./{folder}"):
-            if re.match(r'^\d+\.html$', f_name):
+            is_live = re.match(r'^\d+\.html$', f_name)
+            if is_live or re.match(r'^o\d+\.html$', f_name):
                 try:
                     mtime = int(os.path.getmtime(f"./{folder}/{f_name}"))
                 except OSError:
                     mtime = 0
-                files.append((f"{mtime:011d}", f_name))
+                (files if is_live else old_files).append((f"{mtime:011d}", f_name))
     except OSError:
         pass
 
@@ -444,6 +506,8 @@ def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
                 if not os.path.exists(f"./{folder}/o{f_name}"):
                     try:
                         os.rename(f"./{folder}/{f_name}", f"./{folder}/o{f_name}")
+                        old_files.append((ts, f"o{f_name}"))
+                        retired = True
                     except OSError:
                         pass
             else:
@@ -467,6 +531,8 @@ def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
         W.write(f' {i+1}<a href="{f_name}">{ttl}</a>\n')
 
     W.write("<!-- HEAD LINE END -->\n</font>\n")
+    if old_files:
+        W.write(f'<div class="row links"><a href="{KAKO_FILE}">過去ログ</a></div>\n')
 
     # 各スレッドの内容表示
     for i in range(start_idx, next_int - 1):
@@ -534,6 +600,11 @@ def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
             pass
         error("indexを更新できません.")
 
+    # 過去ログ一覧: 新しく退避したとき、または一覧がまだ無いときだけ作り直す
+    if old_files and (retired or not os.path.exists(f"./{folder}/{KAKO_FILE}")):
+        write_kako(folder, old_files, f'<body{bg_attr} bgcolor="{color}"{text_attr}>',
+                   title0, amezo_name, main_title_suffix, title)
+
     try:
         fcntl.flock(LK, fcntl.LOCK_UN)
         LK.close()
@@ -560,7 +631,9 @@ def main():
     except ValueError:
         pass
 
-    if content_len > 7500:
+    if content_len < 0:
+        error('投稿内容が不正です')
+    if content_len > MAX_POST_BYTES:
         error('投稿内容が大きすぎます')
 
     try:
@@ -568,7 +641,7 @@ def main():
     except Exception:
         buffer = b''
 
-    if len(buffer) > 7500:
+    if len(buffer) > MAX_POST_BYTES:
         error('投稿内容が大きすぎます')
 
     query_params = {}
@@ -656,15 +729,21 @@ def main():
     if not name and not subj and not comm:
         reload_flag = True
 
-    if comm.count('<br>') > 20:
+    if comm.count('<br>') > COMM_LINES_MAX:
         error('改行が多すぎます')
-    if html_chars_len(subj) > 20:
+    # 本文の改行 (<br>) は1文字として数える
+    if html_chars_len(comm.replace('<br>', '\n')) > COMM_MAX:
+        error('コメントが長すぎます')
+    if html_chars_len(mail) > MAIL_MAX:
+        error('メールが長すぎます')
+
+    subj = re.sub(r' |　|＿', '', subj)
+    if html_chars_len(subj) > SUBJ_MAX:
         error('題名が長すぎます')
 
     name = re.sub(r' |　|\u200D', '', name)
-    name = ccut(name, 30)
+    name = ccut(name, NAME_MAX)
     comm = re.sub(r'&gt;(&gt;)+', '&gt;', comm)
-    subj = re.sub(r' |　|＿', '', subj)
 
     # NGワードチェック用の元メッセージデコード
     comm2 = comm
@@ -747,7 +826,7 @@ def main():
             try:
                 W = open(file_path, 'r+', encoding='utf-8')
             except FileNotFoundError:
-                error('スレッドがありません.')
+                thread_missing(folder, res, '返信')
 
         fcntl.flock(W, fcntl.LOCK_EX)
         cnt = 0

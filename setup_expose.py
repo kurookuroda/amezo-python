@@ -33,8 +33,9 @@ ALLOWED_CGI = {"amezo", "dai", "admin"}
 # 板フォルダの外で配信を許可するパス
 STATIC_ROOT_FILES = {"/", "/index.html", "/style.css"}
 
-# 板フォルダの中で配信を許可するファイル名 (x〜.html / o〜.html は含まない)
-BOARD_FILE_RE = r'(?:index2?|\d+)\.html'
+# 板フォルダの中で配信を許可するファイル名
+# (o数字.html は退避した過去ログ、kako.html はその一覧。x〜.html は含まない)
+BOARD_FILE_RE = r'(?:index2?|kako|o?\d+)\.html'
 
 DEFAULT_BOARDS = ["main", "zatsu", "test"]
 
@@ -141,7 +142,7 @@ class MyCGIHandler(SimpleHTTPRequestHandler):
         if path in STATIC_ROOT_FILES:
             return True
 
-        # /板名  /板名/  /板名/index.html  /板名/index2.html  /板名/数字.html
+        # /板名  /板名/  /板名/index.html  /板名/index2.html  /板名/数字.html  /板名/o数字.html  /板名/kako.html
         m = re.fullmatch(r'/([^/\\]+)(?:/(?:' + BOARD_FILE_RE + r')?)?', path)
         if not m:
             return False

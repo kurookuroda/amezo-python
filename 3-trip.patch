@@ -1,0 +1,193 @@
+--- a/amezo.py
++++ b/amezo.py
+@@ -12,6 +12,7 @@
+ import urllib.parse
+ import html
+ import hashlib
++import base64
+ from datetime import datetime
+ 
+ # スクリプトのあるディレクトリに固定
+@@ -60,6 +61,16 @@
+ HASH_SCHEME = 'pbkdf2_sha256'
+ HASH_ITERATIONS = 100000
+ 
++# ---- トリップ / キャップ ------------------------------------------------------
++# 名前欄に「名前#パスワード」と書くと、名前の後ろに ◆ と10文字を付ける。
++# 同じパスワードなら同じ10文字になる。計算には trip_secret.txt の秘密鍵を使い、
++# このファイルが無くなると (クローンし直したときなど) 全員のトリップが変わる。
++TRIP_SECRET_FILE = 'trip_secret.txt'
++TRIP_PASS_MAX = 100        # パスワードの最大文字数 (超えた分は無視)
++TRIP_MARK = '◆'            # トリップの印 (名前に直接書かれたら ◇ に置き換える)
++CAP_MARK = '★'             # キャップの印 (名前に直接書かれたら ☆ に置き換える)
++CAP_FILE = 'cap.txt'       # 1行: 表示名,パスワードのハッシュ (amezo.py --make-hash で作る)
++
+ HEADER = "Content-type: text/html; charset=UTF-8\r\n\r\n"
+ 
+ _ENTITY_TOKEN = re.compile(r'&(?:amp|quot|lt|gt|#39);|[\s\S]')
+@@ -157,6 +168,81 @@
+     return hmac.compare_digest(dk, expected)
+ 
+ 
++# ---- トリップ / キャップ -----------------------------------------------------
++
++def load_trip_secret():
++    """トリップ用の秘密鍵 (32バイト)。無ければ作る。
++    同時に作られても、最初に置かれた鍵が全員に使われるよう os.link で置く。"""
++    def read_key():
++        try:
++            with open(TRIP_SECRET_FILE, 'r', encoding='ascii') as f:
++                s = f.read().strip()
++            if re.fullmatch(r'[0-9a-f]{64}', s):
++                return bytes.fromhex(s)
++        except (OSError, UnicodeDecodeError):
++            pass
++        return None
++
++    key = read_key()
++    if key:
++        return key
++    key = os.urandom(32)
++    tmp = f"{TRIP_SECRET_FILE}.tmp{os.getpid()}"
++    try:
++        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
++        with os.fdopen(fd, 'w', encoding='ascii') as w:
++            w.write(key.hex() + '\n')
++        try:
++            os.link(tmp, TRIP_SECRET_FILE)
++        except FileExistsError:
++            other = read_key()
++            if other:
++                return other
++            os.replace(tmp, TRIP_SECRET_FILE)      # 壊れた鍵ファイルは置き換える
++    except OSError:
++        pass                                       # 置けなくても、この投稿には使える
++    finally:
++        try:
++            os.unlink(tmp)
++        except OSError:
++            pass
++    return read_key() or key
++
++
++def clean_trip_password(password):
++    """空白を除き、全角の英数字・記号を半角にそろえ、長さを制限する"""
++    pw = re.sub(r' |　', '', password)
++    pw = ''.join(chr(ord(c) - 0xFEE0) if '\uff01' <= c <= '\uff5e' else c for c in pw)
++    return pw[:TRIP_PASS_MAX]
++
++
++def make_trip(password):
++    """パスワードからトリップの10文字を作る。パスワードが空なら ''"""
++    pw = clean_trip_password(password)
++    if not pw:
++        return ''
++    digest = hmac.new(load_trip_secret(), pw.encode('utf-8'), hashlib.sha256).digest()
++    return base64.b64encode(digest).decode('ascii')[:10].replace('+', '.').replace('/', '_')
++
++
++def is_cap(name_escaped, password):
++    """名前とパスワードが cap.txt の組と一致するか (名前が一致したときだけ重い計算をする)"""
++    if not password:
++        return False
++    try:
++        with open(CAP_FILE, 'r', encoding='utf-8') as f:
++            for line in f:
++                line = line.rstrip('\r\n')
++                if not line or line.startswith('#') or ',' not in line:
++                    continue
++                cap_name, _, stored = line.rpartition(',')
++                if html_escape(cap_name) == name_escaped and verify_hash(password, stored):
++                    return True
++    except OSError:
++        pass
++    return False
++
++
+ def load_delcrypt():
+     try:
+         with open(DELCRYPTFILE, 'r', encoding='utf-8') as f:
+@@ -653,6 +739,7 @@
+                 query_params[k] = url_decode(v)
+ 
+     form = {}
++    trip_pw = ''        # 名前欄の「#」より後ろ (エスケープ前のまま。保存も表示もしない)
+     if buffer:
+         for pair in buffer.split(b'&'):
+             if b'=' in pair:
+@@ -660,6 +747,10 @@
+                 key = to_utf8(k_b)
+                 value = url_decode(v_b)
+                 value = strip_invisible(value)
++                if key == 'name':
++                    # 最初の半角 # で、名前とパスワードに分ける (全角の ＃ は区切りにしない)
++                    value, _, pw_part = value.partition('#')
++                    trip_pw = re.sub(r'[\x00-\x1f]', '', pw_part)
+                 value = html_escape(value)
+                 value = value.replace('\r\n', '\r').replace('\n', '\r')
+                 if key == 'comm':
+@@ -741,6 +832,7 @@
+     if html_chars_len(subj) > SUBJ_MAX:
+         error('題名が長すぎます')
+ 
++    name = name.replace(TRIP_MARK, '◇').replace(CAP_MARK, '☆')   # トリップ・キャップの偽造防止
+     name = re.sub(r' |　|\u200D', '', name)
+     name = ccut(name, NAME_MAX)
+     comm = re.sub(r'&gt;(&gt;)+', '&gt;', comm)
+@@ -775,9 +867,13 @@
+             pass
+ 
+     if next_int == 21 and not reload_flag:
++        # キャップ (cap.txt の名前とパスワードに一致したとき) は、管理者名の置き換えをしない
++        cap_ok = is_cap(name, trip_pw)
++
+         # 管理者名偽装防止
+-        admin_pat = re.escape(ADMIN)
+-        name = re.sub(admin_pat, f"＃{ADMIN}", name)
++        if not cap_ok:
++            admin_pat = re.escape(ADMIN)
++            name = re.sub(admin_pat, f"＃{ADMIN}", name)
+ 
+         if res:
+             subj = ''
+@@ -797,6 +893,12 @@
+             check_global_ip(client_ip())
+ 
+         comm = re.sub(r'(https?\:[\w\.\~\-\/\?\+\=\:\@\%\;\#\&]+)', url_link, comm)
++        if cap_ok:
++            name += CAP_MARK
++        else:
++            trip = make_trip(trip_pw)
++            if trip:
++                name += TRIP_MARK + trip
+         if mail:
+             name = f'<a href="mailto:{mail} ">{name} </a>'
+ 
+--- a/README.md
++++ b/README.md
+@@ -22,6 +22,8 @@
+ | `blist.txt` | 板の定義。`フォルダ名,背景色,タイトル` の1行1板 |
+ | `ng.txt` | NG ワード。`ワード,オプション` (なし=削除、`n`=名前、`c`=本文に含まれたら投稿しない) |
+ | `delpass.txt` | 管理用パスワードのハッシュ (`pbkdf2_sha256$…`)。`amezo.py --make-hash` で作る |
++| `trip_secret.txt` | トリップ用の秘密鍵。最初の `#` つき投稿のときに自動で作る (権限 600)。GitHub に入れない (`.gitignore`)。無くなると全員のトリップが変わる |
++| `cap.txt` | キャップの定義。`表示名,パスワードのハッシュ` の1行1件 (`#` で始まる行はコメント)。無くてもよい |
+ | `global.mem` | 新規スレッド作成の IP 制限用。IP と時刻を 180 秒だけ保持 |
+ | `admin_fail.mem` | 管理画面のログイン失敗の記録 (IP、回数、時刻) |
+ | `板/数字.html` | スレッド (数字は作成日時 `yyMMddHHmmss`) |
+@@ -53,7 +55,10 @@
+ 1. **受け取り**: 送信が 7500 バイト (`MAX_POST_BYTES`) を超える内容と、`CONTENT_LENGTH` が負の値のものは拒否します。フォームの値は、見えない文字を除去し、HTML エスケープし、本文の改行は `<br>` に変えます。
+ 2. **板の判定**: `folder` が無ければ Referer のパスから取り出します。`blist.txt` に無い板、`/` や `..` を含む名前は拒否します。
+ 3. **再読み込み扱い**: 3つの入力欄がすべて空、`name`/`subj`/`comm` が同じ値、または NG ワード (`n`/`c`) に当たった場合は、投稿せず、ページの再生成だけを行います。「次のページ」の操作もこの扱いです。
+-4. **入力の検査**: 改行 20 個まで、題名 45 文字まで、本文 400 文字まで、メール 50 文字まででエラーにし、投稿者名は 25 文字を超えた分を切り捨てます。文字数は、全角・半角・絵文字を区別せず1文字と数え (`&amp;` などのエスケープも1文字、本文の改行も1文字)、題名と名前は空白を除いた文字数です。上限は `amezo.py` の `SUBJ_MAX`、`NAME_MAX`、`MAIL_MAX`、`COMM_MAX` で変えられます。名前の空白は除去し、`ng.txt` の削除ワードを取り除きます。管理者名「サポート」を名乗る投稿は、`＃サポート` に変えます。
++4. **入力の検査**: 改行 20 個まで、題名 45 文字まで、本文 400 文字まで、メール 50 文字まででエラーにし、投稿者名は 25 文字を超えた分を切り捨てます。文字数は、全角・半角・絵文字を区別せず1文字と数え (`&amp;` などのエスケープも1文字、本文の改行も1文字)、題名と名前は空白を除いた文字数です。上限は `amezo.py` の `SUBJ_MAX`、`NAME_MAX`、`MAIL_MAX`、`COMM_MAX` で変えられます。名前の空白は除去し、`ng.txt` の削除ワードを取り除きます。管理者名「サポート」を名乗る投稿は、`＃サポート` に変えます (キャップに一致したときを除く)。
++   - **トリップ**: 名前欄の最初の半角 `#` より後ろをパスワードとし、名前の後ろに `◆` と10文字を付けます (全角の `＃` は区切りにしません)。パスワードは名前の文字数に数えず、NG ワードの対象にもせず、保存もしません。パスワードは、空白を除き、全角の英数字・記号を半角にそろえ、100 文字までを使います。計算は `HMAC-SHA256(trip_secret.txt の鍵, パスワード)` の先頭10文字です。同じパスワードなら同じ10文字になりますが、**鍵が変わる (`trip_secret.txt` が無くなる、クローンし直すなど) と、全員のトリップが変わります**。パスワードが空、または空白だけのときは、トリップを付けません。
++   - **偽造防止**: 名前に直接書かれた `◆` は `◇` に、`★` は `☆` に置き換えます。
++   - **キャップ**: `cap.txt` の表示名と、名前が一致し、`#` の後ろのパスワードがそのハッシュに合うとき、`◆` の代わりに `★` を付けます。このときだけ、名前に「サポート」などの管理者名を使えます (管理者名の置き換えをしません)。ハッシュは `python3 amezo.py --make-hash パスワード` で作ります。キャップはトリップの値を使わないので、鍵が変わっても有効です。
+ 5. **制限**: 同じ板で 5 秒以内の連投は拒否します (`lasttime.txt`)。新規スレッドは、同じ IP から 180 秒に 1 回だけです (`global.mem`)。
+ 6. **書き込み**:
+    - 新規スレッドは、`yyMMddHHmmss` のファイルを `O_EXCL` で作ります。重複したら番号を足して、30 回まで試します。
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,2 @@
++trip_secret.txt
++trip_secret.txt.tmp*
