@@ -640,7 +640,8 @@ def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
     except OSError:
         pass
 
-    files.sort(key=lambda x: x[0], reverse=True)
+    # 更新日時の新しい順。同じ秒のときはファイル名の新しい順 (並びを毎回同じにするため)
+    files.sort(key=lambda x: (x[0], x[1]), reverse=True)
 
     # 古いスレッドを退避 (oスレッドID.html)
     if MAX_THREADS > 0:
