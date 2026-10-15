@@ -44,6 +44,8 @@ ADMIN = 'サポート'
 POST_INTERVAL = 5
 MAX_THREADS = 200          # この数を超えた古いスレッドは o数字.html に退避 (0 なら退避しない)
 KAKO_FILE = 'kako.html'    # 退避したスレッド(過去ログ)の一覧ページ
+KAKO_LIST = 'kako.txt'     # 退避したスレッドの題名の一覧。1行: o数字.html<>題名 (古い順に追記)
+KAKO_SEP = '<>'            # 題名は < と > をエスケープ済みなので、<> は題名に現れない
 
 # ---- 入力の長さの上限 -----------------------------------------------------
 # 文字数は「見た目の文字数」: 全角も半角も絵文字も1文字、&amp; などのエスケープも1文字、
@@ -392,11 +394,76 @@ def res_view(folder, form):
 
 # ---- 過去ログ一覧 -----------------------------------------------------
 
-def write_kako(folder, old_files, body_tag, title0, amezo_name, main_title_suffix, title):
-    """退避したスレッド (o数字.html) の一覧 板/kako.html を作る。
-    old_files: [(更新時刻の文字列, 'o数字.html'), ...]
+def read_thread_title(path):
+    """スレッドのファイルの1行目から題名を取り出す (読めなければ '')"""
+    try:
+        with open(path, 'r', encoding='utf-8') as rf:
+            m = re.search(r'<b>([^<]*)</b>', rf.readline())
+            return m.group(1) if m else ''
+    except OSError:
+        return ''
+
+
+def kako_list_size(folder):
+    """kako.txt の大きさ。無ければ -1"""
+    try:
+        return os.path.getsize(f"./{folder}/{KAKO_LIST}")
+    except OSError:
+        return -1
+
+
+def append_kako_list(folder, items):
+    """今回退避したスレッド [(更新時刻の文字列, 'o数字.html'), ...] の題名を kako.txt に追記する。
+    退避は古いものから順に起きるので、追記すれば古い順のままになる。"""
+    try:
+        with open(f"./{folder}/{KAKO_LIST}", 'a', encoding='utf-8', newline='') as W:
+            for ts, name in sorted(items):
+                W.write(f"{name}{KAKO_SEP}{read_thread_title(f'./{folder}/{name}')}\n")
+        return True
+    except OSError:
+        return False
+
+
+def rebuild_kako_list(folder, names):
+    """今ある o数字.html から kako.txt を作り直す (kako.txt が無いときの1回だけ)。更新日時の古い順。"""
+    items = []
+    for name in names:
+        try:
+            mtime = int(os.path.getmtime(f"./{folder}/{name}"))
+        except OSError:
+            mtime = 0
+        items.append((f"{mtime:011d}", name))
+    items.sort()
+    path = f"./{folder}/{KAKO_LIST}"
+    tmp_path = f"{path}.tmp{os.getpid()}"
+    try:
+        with open(tmp_path, 'w', encoding='utf-8', newline='') as W:
+            for ts, name in items:
+                W.write(f"{name}{KAKO_SEP}{read_thread_title(f'./{folder}/{name}')}\n")
+        os.chmod(tmp_path, 0o644)
+        os.replace(tmp_path, path)
+        return True
+    except OSError:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return False
+
+
+def write_kako(folder, body_tag, title0, amezo_name, main_title_suffix, title):
+    """過去ログの一覧 板/kako.html を、kako.txt から作る (新しい退避が上)。
     失敗しても投稿処理は止めない (一覧が古いままになるだけ)。"""
-    old_files = sorted(old_files, key=lambda x: (x[0], x[1]), reverse=True)
+    entries = []
+    try:
+        with open(f"./{folder}/{KAKO_LIST}", 'r', encoding='utf-8') as rf:
+            for line in rf:
+                name, sep, ttl = line.rstrip('\r\n').partition(KAKO_SEP)
+                if sep and re.match(r'^o\d+\.html$', name):    # 壊れた行は読み飛ばす
+                    entries.append((name, ttl))
+    except OSError:
+        return
+    entries.reverse()
     kako_path = f"./{folder}/{KAKO_FILE}"
     tmp_path = f"{kako_path}.tmp{os.getpid()}"
     try:
@@ -412,16 +479,8 @@ def write_kako(folder, old_files, body_tag, title0, amezo_name, main_title_suffi
                 f'<div class="row links"><a href="./">板へ戻る</a></div>\n'
                 f'<font size=2>\n'
             )
-            for i, (ts, f_name) in enumerate(old_files, 1):
-                ttl = ""
-                try:
-                    with open(f"./{folder}/{f_name}", 'r', encoding='utf-8') as rf:
-                        m_ttl = re.search(r'<b>([^<]*)</b>', rf.readline())
-                        if m_ttl:
-                            ttl = m_ttl.group(1)
-                except OSError:
-                    pass
-                W.write(f' {i}<a href="{f_name}">{ttl}</a>\n')
+            for i, (name, ttl) in enumerate(entries, 1):
+                W.write(f' {i}<a href="{name}">{ttl}</a>\n')
             W.write('</font>\n<hr></body></html>\n')
         os.chmod(tmp_path, 0o644)
         os.replace(tmp_path, kako_path)
@@ -566,17 +625,18 @@ def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
 
     # ディレクトリ走査してヘッドラインをソート生成
     files = []
-    old_files = []      # 退避済み (o数字.html) のスレッド = 過去ログ
-    retired = False     # 今回の再生成で新しく退避したか
+    old_names = []      # 退避済み (o数字.html) のファイル名。更新日時などは調べない
+    retired_now = []    # 今回の再生成で新しく退避した [(更新時刻の文字列, 'o数字.html'), ...]
     try:
         for f_name in os.listdir(f"./{folder}"):
-            is_live = re.match(r'^\d+\.html$', f_name)
-            if is_live or re.match(r'^o\d+\.html$', f_name):
+            if re.match(r'^\d+\.html$', f_name):
                 try:
                     mtime = int(os.path.getmtime(f"./{folder}/{f_name}"))
                 except OSError:
                     mtime = 0
-                (files if is_live else old_files).append((f"{mtime:011d}", f_name))
+                files.append((f"{mtime:011d}", f_name))
+            elif re.match(r'^o\d+\.html$', f_name):
+                old_names.append(f_name)
     except OSError:
         pass
 
@@ -592,13 +652,22 @@ def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
                 if not os.path.exists(f"./{folder}/o{f_name}"):
                     try:
                         os.rename(f"./{folder}/{f_name}", f"./{folder}/o{f_name}")
-                        old_files.append((ts, f"o{f_name}"))
-                        retired = True
+                        retired_now.append((ts, f"o{f_name}"))
                     except OSError:
                         pass
             else:
                 filtered_files.append((ts, f_name))
         files = filtered_files
+
+    # 過去ログの題名一覧 (kako.txt): 退避したスレッドの題名を追記していくので、
+    # 退避済みのファイルを毎回開かずに済む。無い (または空の) ときだけ、今ある o〜.html から作る。
+    kako_changed = False
+    if kako_list_size(folder) <= 0:
+        if old_names or retired_now:
+            kako_changed = rebuild_kako_list(folder, old_names + [n for _, n in retired_now])
+    elif retired_now:
+        kako_changed = append_kako_list(folder, retired_now)
+    has_kako = kako_list_size(folder) > 0
 
     start_idx = next_int - 21
     for i in range(start_idx, start_idx + 100):
@@ -617,7 +686,7 @@ def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
         W.write(f' {i+1}<a href="{f_name}">{ttl}</a>\n')
 
     W.write("<!-- HEAD LINE END -->\n</font>\n")
-    if old_files:
+    if has_kako:
         W.write(f'<div class="row links"><a href="{KAKO_FILE}">過去ログ</a></div>\n')
 
     # 各スレッドの内容表示
@@ -686,9 +755,9 @@ def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
             pass
         error("indexを更新できません.")
 
-    # 過去ログ一覧: 新しく退避したとき、または一覧がまだ無いときだけ作り直す
-    if old_files and (retired or not os.path.exists(f"./{folder}/{KAKO_FILE}")):
-        write_kako(folder, old_files, f'<body{bg_attr} bgcolor="{color}"{text_attr}>',
+    # 過去ログ一覧 (kako.html): 題名の一覧が変わったとき、またはまだ無いときだけ作り直す
+    if has_kako and (kako_changed or not os.path.exists(f"./{folder}/{KAKO_FILE}")):
+        write_kako(folder, f'<body{bg_attr} bgcolor="{color}"{text_attr}>',
                    title0, amezo_name, main_title_suffix, title)
 
     try:
