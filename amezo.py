@@ -57,6 +57,10 @@ MAIL_MAX = 50              # メール   超えたらエラー
 COMM_MAX = 400             # 本文     超えたらエラー
 COMM_LINES_MAX = 20        # 本文の改行の数
 PAGE_CACHE = 10
+PER_PAGE = 20              # 1ページに表示するスレッドの数
+HEADLINE_COUNT = 100       # 見出し (HEAD LINE) の数
+TAIL_MIN_SIZE = 262144     # このサイズを超えるスレッドは、全部読まずに先頭行と末尾だけ読む
+TAIL_CHUNK = 131072        # 末尾から読む大きさ
 TRUSTED_PROXIES = ['127.0.0.1', '::1']
 DELCRYPTFILE = 'delpass.txt'
 
@@ -174,7 +178,9 @@ def verify_hash(password, stored):
 
 def load_trip_secret():
     """トリップ用の秘密鍵 (32バイト)。無ければ作る。
-    同時に作られても、最初に置かれた鍵が全員に使われるよう os.link で置く。"""
+    同時に作られても、最初に置かれた鍵が全員に使われるよう os.link で置く。
+    os.link が使えない環境 (Google Drive のマウントなど) では、最終のファイルを直接作る。
+    どうしても保存できないときは None (鍵が投稿のたびに変わってしまうので、使わせない)。"""
     def read_key():
         try:
             with open(TRIP_SECRET_FILE, 'r', encoding='ascii') as f:
@@ -189,11 +195,12 @@ def load_trip_secret():
     if key:
         return key
     key = os.urandom(32)
+    data = key.hex() + '\n'
     tmp = f"{TRIP_SECRET_FILE}.tmp{os.getpid()}"
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, 'w', encoding='ascii') as w:
-            w.write(key.hex() + '\n')
+            w.write(data)
         try:
             os.link(tmp, TRIP_SECRET_FILE)
         except FileExistsError:
@@ -201,14 +208,28 @@ def load_trip_secret():
             if other:
                 return other
             os.replace(tmp, TRIP_SECRET_FILE)      # 壊れた鍵ファイルは置き換える
+        except OSError:
+            # ハードリンクが使えない環境: 最終のファイルを直接 (既にあれば失敗する形で) 作る
+            try:
+                fd = os.open(TRIP_SECRET_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                for _ in range(20):                # 他のプロセスが書いている途中かもしれないので少し待つ
+                    time.sleep(0.05)
+                    other = read_key()
+                    if other:
+                        return other
+                os.replace(tmp, TRIP_SECRET_FILE)  # 壊れたままなら置き換える
+            else:
+                with os.fdopen(fd, 'w', encoding='ascii') as w:
+                    w.write(data)
     except OSError:
-        pass                                       # 置けなくても、この投稿には使える
+        pass
     finally:
         try:
             os.unlink(tmp)
         except OSError:
             pass
-    return read_key() or key
+    return read_key()
 
 
 def clean_trip_password(password):
@@ -223,7 +244,10 @@ def make_trip(password):
     pw = clean_trip_password(password)
     if not pw:
         return ''
-    digest = hmac.new(load_trip_secret(), pw.encode('utf-8'), hashlib.sha256).digest()
+    key = load_trip_secret()
+    if not key:
+        error('トリップ用の鍵を保存できません.')
+    digest = hmac.new(key, pw.encode('utf-8'), hashlib.sha256).digest()
     return base64.b64encode(digest).decode('ascii')[:10].replace('+', '.').replace('/', '_')
 
 
@@ -238,7 +262,7 @@ def is_cap(name_escaped, password):
                 if not line or line.startswith('#') or ',' not in line:
                     continue
                 cap_name, _, stored = line.rpartition(',')
-                if html_escape(cap_name) == name_escaped and verify_hash(password, stored):
+                if html_escape(re.sub(r' |　|\u200D', '', cap_name)) == name_escaped and verify_hash(password, stored):
                     return True
     except OSError:
         pass
@@ -492,13 +516,219 @@ def write_kako(folder, body_tag, title0, amezo_name, main_title_suffix, title):
 
 # ---- インデックス再生成 (amezo.py の投稿処理と admin.py の両方から使う) -------------
 
-def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
-    """板の index.html (next_int != 21 のときは index2.html) を再生成する。
+# ---- ページ送り・スレッドの読み込み ------------------------------------------
+
+def pager_html(folder, page, total):
+    """ページ送り: ← 前の20件　1 2 [3] 4 5　次の20件 →  (ページが1つだけなら空)
+    2ページ目以降のリンクは CGI (amezo.cgi?folder=板&page=N) を通る。ページのファイルが古ければ作り直して案内する。"""
+    if total <= 1:
+        return ''
+    q = urllib.parse.quote(folder, safe='')
+
+    def link(p, label):
+        href = './' if p == 1 else f'../amezo.cgi?folder={q}&amp;page={p}'
+        return f'<a href="{href}">{label}</a>'
+
+    shown = sorted({1, total} | set(range(max(1, page - 3), min(total, page + 3) + 1)))
+    items = []
+    prev = 0
+    for p in shown:
+        if p - prev > 1:
+            items.append('…')
+        items.append(f'<b>{p}</b>' if p == page else link(p, str(p)))
+        prev = p
+    parts = []
+    if page > 1:
+        parts.append(link(page - 1, f'← 前の{PER_PAGE}件'))
+    parts.append(' '.join(items))
+    if page < total:
+        parts.append(link(page + 1, f'次の{PER_PAGE}件 →'))
+    return '<div class="row pager">' + '　'.join(parts) + '</div>\n'
+
+
+def total_pages(n_threads):
+    return max(1, (n_threads + PER_PAGE - 1) // PER_PAGE)
+
+
+def scan_threads(folder, want_old=True):
+    """板のフォルダを調べる。戻り値: (スレッド [(更新時刻の文字列, ファイル名)] を新しい順, 退避済みのファイル名の一覧)
+    同じ秒のときはファイル名の新しい順 (並びを毎回同じにするため)。"""
+    files = []
+    old_names = []      # 退避済み (o数字.html) のファイル名。更新日時などは調べない
+    try:
+        for f_name in os.listdir(f"./{folder}"):
+            if re.match(r'^\d+\.html$', f_name):
+                try:
+                    mtime = int(os.path.getmtime(f"./{folder}/{f_name}"))
+                except OSError:
+                    mtime = 0
+                files.append((f"{mtime:011d}", f_name))
+            elif want_old and re.match(r'^o\d+\.html$', f_name):
+                old_names.append(f_name)
+    except OSError:
+        pass
+    files.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return files, old_names
+
+
+def read_thread_tail(path, size):
+    """大きなスレッドのファイルから、先頭行と最後の7レスだけを読む。
+    戻り値: (先頭行, 最後の7レス, レス行の総数)。形が想定と違えば None (呼び出し側が全部読む)。
+    想定: 改行が \\n だけで、最後に <form で始まる行が1つあり、その前の行が <dl><dt> で始まる。
+    レス行の総数は、ファイル全体の改行を数えて求める (少しずつ読むので、メモリは増えない。
+    管理画面でレスを消すと番号に飛びが出るので、最後の番号からは数えない)。"""
+    with open(path, 'rb') as f:
+        head = f.read(65536)
+        first_end = head.find(b'\n')
+        if first_end < 0 or b'\r' in head:
+            return None
+        first_line = head[:first_end + 1].decode('utf-8')
+        chunk_start = max(first_end + 1, size - TAIL_CHUNK)
+        f.seek(chunk_start)
+        tail = f.read()
+    if b'\r' in tail:
+        return None
+    if chunk_start > first_end + 1:             # 読み始めが行の途中なので、最初の1行は捨てる
+        cut = tail.find(b'\n')
+        if cut < 0:
+            return None
+        tail = tail[cut + 1:]
+    lines = re.findall(r'[^\n]*\n|[^\n]+', tail.decode('utf-8'))
+    form_idx = [i for i, l in enumerate(lines) if l.startswith('<form')]
+    if len(form_idx) != 1:
+        return None
+    reply = lines[:form_idx[0]]
+    if len(reply) < 7:
+        return None
+    last7 = reply[-7:]
+    if not all(l.startswith('<dl><dt>') for l in last7):
+        return None
+    total_nl = 0
+    with open(path, 'rb') as f:
+        while True:
+            buf = f.read(65536)
+            if not buf:
+                break
+            total_nl += buf.count(b'\n')
+    total_lines = total_nl + (0 if tail.endswith(b'\n') else 1)
+    after_form = len(lines) - form_idx[0]        # <form の行から最後までの行数
+    return first_line, last7, total_lines - 1 - after_form     # 先頭行と、<form 以降を除いた、レス行の数
+
+
+def read_thread_excerpt(path):
+    """スレッドのファイルから、表示に使う部分を取り出す。
+    戻り値: (先頭行, 最後の7レス, レス行の総数)。読めなければ None。"""
+    try:
+        size = os.path.getsize(path)
+        if size > TAIL_MIN_SIZE:
+            r = read_thread_tail(path, size)
+            if r is not None:
+                return r
+        lines = []
+        with open(path, 'r', encoding='utf-8') as rf:
+            first_line = rf.readline()
+            for line in rf:
+                if line.startswith('<form'):
+                    break
+                lines.append(line)
+        return first_line, lines[max(len(lines) - 7, 0):], len(lines)
+    except OSError:
+        return None
+
+
+def write_index_page(W, folder, page, total, files, v):
+    """index の内容を W に書く。v: 板の見た目の情報 (regen_index が作る)"""
+    pager = pager_html(folder, page, total)
+    W.write(
+        f'<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">\n'
+        f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f'<link rel="stylesheet" href="../style.css">\n'
+        f'<title>{v["title0"]}{v["amezo_name"]}{v["suffix"]}</title></head>\n'
+        f'{COPYRIGHT}\n'
+        f'<body{v["bg_attr"]} bgcolor="{v["color"]}"{v["text_attr"]}>\n'
+        f'<font size=+2>{v["title"]}{v["amezo_name"]}{v["suffix"]}</font>\n'
+    )
+
+    if os.path.exists('./header.html'):
+        try:
+            with open('./header.html', 'r', encoding='utf-8') as hf:
+                W.write(hf.read())
+        except OSError:
+            pass
+
+    W.write(pager + '<font size=2>\n<!-- HEAD LINE -->\n')
+
+    start_idx = (page - 1) * PER_PAGE
+    for i in range(start_idx, start_idx + HEADLINE_COUNT):
+        if i >= len(files):
+            break
+        ts, f_name = files[i]
+        ttl = ""
+        try:
+            with open(f"./{folder}/{f_name}", 'r', encoding='utf-8') as rf:
+                first_line = rf.readline()
+                m_ttl = re.search(r'<b>([^<]*)</b>', first_line)
+                if m_ttl:
+                    ttl = m_ttl.group(1)
+        except OSError:
+            pass
+        W.write(f' {i+1}<a href="{f_name}">{ttl}</a>\n')
+
+    W.write("<!-- HEAD LINE END -->\n</font>\n")
+    if kako_list_size(folder) > 0:
+        W.write(f'<div class="row links"><a href="{KAKO_FILE}">過去ログ</a></div>\n')
+
+    # 各スレッドの内容表示
+    for i in range(start_idx, start_idx + PER_PAGE):
+        if i >= len(files):
+            break
+        ts, f_name = files[i]
+        W.write('<table border=1 cellspacing=1 cellpadding=2 width=100% bgcolor="#efefef"><tr><td><font color="#000000">\n')
+
+        lines = []
+        n_lines = 0
+        ex = read_thread_excerpt(f"./{folder}/{f_name}")
+        if ex is not None:
+            first_line, lines, n_lines = ex
+            # スレッドの先頭行から html/head/body/meta/title/link を削って出力
+            first_line = re.sub(r'</?(?:html|head|body)[^>]*>', '', first_line)
+            first_line = re.sub(r'<(?:meta|link)[^>]*>', '', first_line)
+            first_line = re.sub(r'<title>.*?</title>', '', first_line)
+            W.write(first_line)
+
+        # 最後の7レスのみを抜粋して表示
+        for line in lines:
+            W.write(line)
+
+        res_id = f_name.replace('.html', '')
+        sub_tag = ""
+        if n_lines > 200:
+            k_idx = n_lines - 98
+            sub_tag = (f'<input type=text name="from" value="{k_idx}" size="4">'
+                       '<input type=submit name="sub" value="〜"> ')
+
+        links = (f'<div class="row links"><a href="{res_id}.html">レス全部を見る</a> '
+                 f'{sub_tag}<a href="#top">上へ</a> <a href="./">リロード</a></div>')
+
+        W.write('</font></td></tr></table>\n' + reply_form(res_id, links) + '<hr>\n')
+
+    W.write(pager + '<hr></body></html>\n')
+
+
+# ---- インデックス再生成 (amezo.py の投稿処理と admin.py の両方から使う) -------------
+
+def regen_index(folder, page=1, reload_flag=False, use_cache=True):
+    """板の index.html (page=1) または index{page}.html を再生成する。
+    1ページ目は、投稿のたびに作り直し、古いスレッドの退避と過去ログの更新もする。
+    2ページ目以降は、ページ送りのリンクが押されたときだけ、読むだけで作る (ページごとに別のファイル。
+    同じページなら誰が頼んでも同じ内容なので、同時に作っても、取り違えは起きない)。
     戻り値: (index_name, status)
       status: 'done'   再生成した
               'cached' 直近に更新済みのため再生成しなかった (use_cache=True のときのみ)
-              'busy'   他のプロセスが再生成中でロックを取れなかった
+              'busy'   他のプロセスが再生成中でロックを取れなかった (1ページ目だけ)
     """
+    page = max(1, int(page))
+
     # blist.txt から板の背景色とタイトル取得
     color = ""
     title = ""
@@ -516,9 +746,6 @@ def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
     except FileNotFoundError:
         pass
 
-    page_suffix = '2' if next_int != 21 else ''
-    index_name = f"index{page_suffix}.html"
-    index_path = f"./{folder}/{index_name}"
     main_title_suffix = "(メイン)" if folder == 'main' else ''
 
     bg_attr = ""
@@ -540,27 +767,64 @@ def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
         title0 = m_title.group(1)
         amezo_name = ""
 
-    # キャッシュチェック
-    if use_cache:
-        if next_int == 21 and reload_flag and POST_INTERVAL > 0:
+    v = {'title0': title0, 'amezo_name': amezo_name, 'suffix': main_title_suffix, 'bg_attr': bg_attr,
+         'color': color, 'text_attr': text_attr, 'title': title}
+
+    def replace_index(tmp_path, index_path):
+        try:
+            if os.path.exists(index_path):
+                orig_mode = os.stat(index_path).st_mode & 0o7777
+            else:
+                orig_mode = 0o644
+            os.chmod(tmp_path, orig_mode)
+            os.replace(tmp_path, index_path)
+        except OSError:
             try:
-                mtime = os.path.getmtime(index_path)
-                if time.time() - mtime < POST_INTERVAL:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            error("indexを更新できません.")
+
+    # ---- 2ページ目以降: 読むだけで、そのページのファイルを作る ----
+    if page > 1:
+        files, _ = scan_threads(folder, want_old=False)
+        if MAX_THREADS > 0:
+            files = files[:MAX_THREADS]          # 退避は1ページ目の再生成のときに行うので、ここでは数えないだけ
+        total = total_pages(len(files))
+        if page > total:
+            page = total
+        if page == 1:                             # 範囲外のページは、最後のページに寄せる
+            return regen_index(folder, 1, True, use_cache)
+        index_name = f"index{page}.html"
+        index_path = f"./{folder}/{index_name}"
+        if use_cache and PAGE_CACHE > 0:
+            try:
+                if time.time() - os.path.getmtime(index_path) < PAGE_CACHE:
                     return index_name, 'cached'
             except OSError:
                 pass
+        tmp_path = f"{index_path}.tmp{os.getpid()}"
+        try:
+            W = open(tmp_path, 'w', encoding='utf-8')
+        except OSError:
+            error("indexを書き込めません.")
+        write_index_page(W, folder, page, total, files, v)
+        W.close()
+        replace_index(tmp_path, index_path)
+        return index_name, 'done'
 
-        if next_int != 21 and PAGE_CACHE > 0:
-            try:
-                with open(index_path, 'r', encoding='utf-8') as pf:
-                    head = pf.read(4096)
-                m_next = re.search(r'<!-- AMEZO-NEXT (\d+) -->', head)
-                if m_next and int(m_next.group(1)) == next_int:
-                    mtime = os.path.getmtime(index_path)
-                    if time.time() - mtime < PAGE_CACHE:
-                        return index_name, 'cached'
-            except OSError:
-                pass
+    # ---- 1ページ目 ----
+    index_name = "index.html"
+    index_path = f"./{folder}/{index_name}"
+
+    # キャッシュチェック
+    if use_cache and reload_flag and POST_INTERVAL > 0:
+        try:
+            mtime = os.path.getmtime(index_path)
+            if time.time() - mtime < POST_INTERVAL:
+                return index_name, 'cached'
+        except OSError:
+            pass
 
     # ロック獲得とインデックス再生成
     lock_path = f"./{folder}/regen.lock"
@@ -571,7 +835,7 @@ def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
         error("ロックファイルを作成できません.")
 
     locked = False
-    if next_int == 21 and not reload_flag:
+    if not reload_flag:
         # ブロッキングロック (CGIタイムアウトを考慮し最大10秒)
         for _ in range(100):
             try:
@@ -591,57 +855,9 @@ def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
         LK.close()
         return index_name, 'busy'
 
-    tmp_path = f"{index_path}.tmp{os.getpid()}"
-    try:
-        W = open(tmp_path, 'w', encoding='utf-8')
-    except OSError:
-        LK.close()
-        error("indexを書き込めません.")
-
-    W.write(
-        f'<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">\n'
-        f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-        f'<link rel="stylesheet" href="../style.css">\n'
-        f'<title>{title0}{amezo_name}{main_title_suffix}</title></head>\n'
-        f'{COPYRIGHT}\n'
-        f'<!-- AMEZO-NEXT {next_int} -->\n'
-        f'<body{bg_attr} bgcolor="{color}"{text_attr}>\n'
-        f'<font size=+2>{title}{amezo_name}{main_title_suffix}</font>\n'
-    )
-
-    if os.path.exists('./header.html'):
-        try:
-            with open('./header.html', 'r', encoding='utf-8') as hf:
-                W.write(hf.read())
-        except OSError:
-            pass
-
-    W.write(
-        f'<form method=post action="../amezo.cgi">\n'
-        f'<input type=submit value="次のページ">\n'
-        f'<input type=text name="next" value="{next_int}" size="3">〜</form>\n'
-        f'<font size=2>\n<!-- HEAD LINE -->\n'
-    )
-
     # ディレクトリ走査してヘッドラインをソート生成
-    files = []
-    old_names = []      # 退避済み (o数字.html) のファイル名。更新日時などは調べない
+    files, old_names = scan_threads(folder)
     retired_now = []    # 今回の再生成で新しく退避した [(更新時刻の文字列, 'o数字.html'), ...]
-    try:
-        for f_name in os.listdir(f"./{folder}"):
-            if re.match(r'^\d+\.html$', f_name):
-                try:
-                    mtime = int(os.path.getmtime(f"./{folder}/{f_name}"))
-                except OSError:
-                    mtime = 0
-                files.append((f"{mtime:011d}", f_name))
-            elif re.match(r'^o\d+\.html$', f_name):
-                old_names.append(f_name)
-    except OSError:
-        pass
-
-    # 更新日時の新しい順。同じ秒のときはファイル名の新しい順 (並びを毎回同じにするため)
-    files.sort(key=lambda x: (x[0], x[1]), reverse=True)
 
     # 古いスレッドを退避 (oスレッドID.html)
     if MAX_THREADS > 0:
@@ -670,91 +886,16 @@ def regen_index(folder, next_int=21, reload_flag=False, use_cache=True):
         kako_changed = append_kako_list(folder, retired_now)
     has_kako = kako_list_size(folder) > 0
 
-    start_idx = next_int - 21
-    for i in range(start_idx, start_idx + 100):
-        if i >= len(files):
-            break
-        ts, f_name = files[i]
-        ttl = ""
-        try:
-            with open(f"./{folder}/{f_name}", 'r', encoding='utf-8') as rf:
-                first_line = rf.readline()
-                m_ttl = re.search(r'<b>([^<]*)</b>', first_line)
-                if m_ttl:
-                    ttl = m_ttl.group(1)
-        except OSError:
-            pass
-        W.write(f' {i+1}<a href="{f_name}">{ttl}</a>\n')
-
-    W.write("<!-- HEAD LINE END -->\n</font>\n")
-    if has_kako:
-        W.write(f'<div class="row links"><a href="{KAKO_FILE}">過去ログ</a></div>\n')
-
-    # 各スレッドの内容表示
-    for i in range(start_idx, next_int - 1):
-        if i >= len(files):
-            break
-        ts, f_name = files[i]
-        W.write('<table border=1 cellspacing=1 cellpadding=2 width=100% bgcolor="#efefef"><tr><td><font color="#000000">\n')
-
-        lines = []
-        try:
-            with open(f"./{folder}/{f_name}", 'r', encoding='utf-8') as rf:
-                first_line = rf.readline()
-                # スレッドの先頭行から html/head/body/meta/title/link を削って出力
-                first_line = re.sub(r'</?(?:html|head|body)[^>]*>', '', first_line)
-                first_line = re.sub(r'<(?:meta|link)[^>]*>', '', first_line)
-                first_line = re.sub(r'<title>.*?</title>', '', first_line)
-                W.write(first_line)
-
-                for line in rf:
-                    if line.startswith('<form'):
-                        break
-                    lines.append(line)
-        except OSError:
-            pass
-
-        # 最初の1レスと最後の7レスのみを抜粋して表示
-        k = len(lines) - 7
-        if k < 0:
-            k = 0
-        for m in range(k, len(lines)):
-            W.write(lines[m])
-
-        res_id = f_name.replace('.html', '')
-        sub_tag = ""
-        if len(lines) > 200:
-            k_idx = len(lines) - 98
-            sub_tag = (f'<input type=text name="from" value="{k_idx}" size="4">'
-                       '<input type=submit name="sub" value="〜"> ')
-
-        links = (f'<div class="row links"><a href="{res_id}.html">レス全部を見る</a> '
-                 f'{sub_tag}<a href="#top">上へ</a> <a href="./">リロード</a></div>')
-
-        W.write('</font></td></tr></table>\n' + reply_form(res_id, links) + '<hr>\n')
-
-    W.write(
-        f'<form method=post action="../amezo.cgi">\n'
-        f'<input type=submit value="次のページ">\n'
-        f'<input type=text name="next" value="{next_int}" size="3">〜</form>\n'
-        f'<hr></body></html>\n'
-    )
-    W.close()
-
-    # 元の index ファイルに置き換え
+    tmp_path = f"{index_path}.tmp{os.getpid()}"
     try:
-        if os.path.exists(index_path):
-            orig_mode = os.stat(index_path).st_mode & 0o7777
-        else:
-            orig_mode = 0o644
-        os.chmod(tmp_path, orig_mode)
-        os.replace(tmp_path, index_path)
+        W = open(tmp_path, 'w', encoding='utf-8')
     except OSError:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        error("indexを更新できません.")
+        LK.close()
+        error("indexを書き込めません.")
+
+    write_index_page(W, folder, 1, total_pages(len(files)), files, v)
+    W.close()
+    replace_index(tmp_path, index_path)
 
     # 過去ログ一覧 (kako.html): 題名の一覧が変わったとき、またはまだ無いときだけ作り直す
     if has_kako and (kako_changed or not os.path.exists(f"./{folder}/{KAKO_FILE}")):
@@ -876,13 +1017,17 @@ def main():
     if 'sub' in form and len(form['sub']):
         res_view(folder, form)
 
-    next_val = form.get('next', '1')
-    if not re.match(r'^\d{1,6}$', next_val):
-        next_val = '1'
-    next_int = int(next_val)
-    if next_int <= 0:
-        next_int = 1
-    next_int += 20
+    # ページ指定: ページ送りのリンク (?page=N)。古いフォームの next (開始位置) も、ページに直して受け付ける
+    page = None
+    page_val = form.get('page', query_params.get('page'))
+    if page_val is not None:
+        page = int(page_val) if re.match(r'^\d{1,6}$', page_val) else 1
+    elif 'next' in form:
+        next_val = form['next']
+        if not re.match(r'^\d{1,6}$', next_val):
+            next_val = '1'
+        if int(next_val) >= 2:
+            page = (int(next_val) - 1) // PER_PAGE + 1
 
     reload_flag = False
     if name == subj and name == comm:
@@ -921,7 +1066,7 @@ def main():
                     opt = parts[1] if len(parts) > 1 else ''
                     if not ng:
                         continue
-                    ng_esc = re.escape(ng)
+                    ng_esc = re.escape(html_escape(ng))     # 比べる文章はエスケープ済みなので、ワードもそろえる
                     if opt == 'n':
                         if re.search(ng_esc, name):
                             reload_flag = True
@@ -936,7 +1081,7 @@ def main():
         except OSError:
             pass
 
-    if next_int == 21 and not reload_flag:
+    if page is None and not reload_flag:
         # キャップ (cap.txt の名前とパスワードに一致したとき) は、管理者名の置き換えをしない
         cap_ok = is_cap(name, trip_pw)
 
@@ -1019,7 +1164,7 @@ def main():
         W.seek(pos, 0)
         cnt += 1
 
-        prev_m = re.search(r'<b>(.+?) </b>.+<dd>(.+?) </dl>', prev)
+        prev_m = re.search(r'投稿者：<font[^>]*><b>(.+?) </b>.+<dd>(.+?) </dl>', prev)
         if prev_m and name == prev_m.group(1) and comm == prev_m.group(2):
             W.close()
             error('二重カキコです.')
@@ -1043,7 +1188,9 @@ def main():
         W.close()
         touch_lasttime(folder)
 
-    index_name, _ = regen_index(folder, next_int, reload_flag)
+    if page is not None:
+        reload_flag = True                      # ページを見るだけ (1ページ目も、直近なら作り直さない)
+    index_name, _ = regen_index(folder, page or 1, reload_flag)
     redirect(folder, index_name)
 
 

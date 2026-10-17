@@ -35,7 +35,7 @@ STATIC_ROOT_FILES = {"/", "/index.html", "/style.css"}
 
 # 板フォルダの中で配信を許可するファイル名
 # (o数字.html は退避した過去ログ、kako.html はその一覧。x〜.html は含まない)
-BOARD_FILE_RE = r'(?:index2?|kako|o?\d+)\.html'
+BOARD_FILE_RE = r'(?:index\d*|kako|o?\d+)\.html'
 
 DEFAULT_BOARDS = ["main", "zatsu", "test"]
 

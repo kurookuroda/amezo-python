@@ -10,8 +10,15 @@
 # GETパラメータによるソースコード公開はセキュリティリスクのため実装しない。
 
 import sys
+import os
 import re
 import html as html_module
+
+# どこから実行されても、このファイルのあるフォルダの blist.txt などを読む (amezo.py と同じ)
+try:
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+except Exception:
+    pass
 
 # CGI 環境(LANG=C 等)でも日本語を UTF-8 で出力する
 try:
