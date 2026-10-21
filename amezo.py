@@ -13,7 +13,8 @@ import urllib.parse
 import html
 import hashlib
 import base64
-from datetime import datetime
+import socket
+from datetime import datetime, timedelta, timezone
 
 # スクリプトのあるディレクトリに固定
 try:
@@ -57,6 +58,7 @@ MAIL_MAX = 50              # メール   超えたらエラー
 COMM_MAX = 400             # 本文     超えたらエラー
 COMM_LINES_MAX = 20        # 本文の改行の数
 PAGE_CACHE = 10
+JST = timezone(timedelta(hours=9))   # 日時 (投稿日・スレッド番号・IDの日付) は、サーバーの時刻に関係なく日本時間
 PER_PAGE = 20              # 1ページに表示するスレッドの数
 HEADLINE_COUNT = 100       # 見出し (HEAD LINE) の数
 TAIL_MIN_SIZE = 262144     # このサイズを超えるスレッドは、全部読まずに先頭行と末尾だけ読む
@@ -72,6 +74,15 @@ HASH_ITERATIONS = 100000
 # 同じパスワードなら同じ10文字になる。計算には trip_secret.txt の秘密鍵を使い、
 # このファイルが無くなると (クローンし直したときなど) 全員のトリップが変わる。
 TRIP_SECRET_FILE = 'trip_secret.txt'
+# ---- ID ---------------------------------------------------------------------
+# 書き込みごとに ID:xxxxxxxx を付ける。同じ回線 (IP) の人は、同じ日・同じ板なら同じ ID になる (日替わり)。
+# ID = HMAC(id_secret.txt の鍵, 'id:' + IP + '|' + 日付(日本時間) + '|' + 板名) の先頭8文字。IP そのものは保存しない。
+# 鍵はトリップ用の trip_secret.txt とは別のファイル (片方が漏れても、もう片方は無事なように)。
+ID_SECRET_FILE = 'id_secret.txt'
+ID_LEN = 8
+SCRIPT_TAG = '<script src="../hide.js" defer></script>'   # ID・トリップの非表示 (ブラウザの中だけで動く)。新しいスレッドと板のページに入れる
+ID_CTX = 'id:'             # ID 計算の接頭辞 (別の用途の値と混ざらないように)
+RL_CTX = 'rl:'             # 連続投稿制限 (global.mem) の接頭辞
 TRIP_PASS_MAX = 100        # パスワードの最大文字数 (超えた分は無視)
 TRIP_MARK = '◆'            # トリップの印 (名前に直接書かれたら ◇ に置き換える)
 CAP_MARK = '★'             # キャップの印 (名前に直接書かれたら ☆ に置き換える)
@@ -176,14 +187,14 @@ def verify_hash(password, stored):
 
 # ---- トリップ / キャップ -----------------------------------------------------
 
-def load_trip_secret():
-    """トリップ用の秘密鍵 (32バイト)。無ければ作る。
+def load_secret(path):
+    """秘密鍵 (32バイト) をファイル path から読む。無ければ作る。トリップ用と ID 用で、別のファイルを使う。
     同時に作られても、最初に置かれた鍵が全員に使われるよう os.link で置く。
     os.link が使えない環境 (Google Drive のマウントなど) では、最終のファイルを直接作る。
     どうしても保存できないときは None (鍵が投稿のたびに変わってしまうので、使わせない)。"""
     def read_key():
         try:
-            with open(TRIP_SECRET_FILE, 'r', encoding='ascii') as f:
+            with open(path, 'r', encoding='ascii') as f:
                 s = f.read().strip()
             if re.fullmatch(r'[0-9a-f]{64}', s):
                 return bytes.fromhex(s)
@@ -196,29 +207,29 @@ def load_trip_secret():
         return key
     key = os.urandom(32)
     data = key.hex() + '\n'
-    tmp = f"{TRIP_SECRET_FILE}.tmp{os.getpid()}"
+    tmp = f"{path}.tmp{os.getpid()}"
     try:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, 'w', encoding='ascii') as w:
             w.write(data)
         try:
-            os.link(tmp, TRIP_SECRET_FILE)
+            os.link(tmp, path)
         except FileExistsError:
             other = read_key()
             if other:
                 return other
-            os.replace(tmp, TRIP_SECRET_FILE)      # 壊れた鍵ファイルは置き換える
+            os.replace(tmp, path)      # 壊れた鍵ファイルは置き換える
         except OSError:
             # ハードリンクが使えない環境: 最終のファイルを直接 (既にあれば失敗する形で) 作る
             try:
-                fd = os.open(TRIP_SECRET_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             except FileExistsError:
                 for _ in range(20):                # 他のプロセスが書いている途中かもしれないので少し待つ
                     time.sleep(0.05)
                     other = read_key()
                     if other:
                         return other
-                os.replace(tmp, TRIP_SECRET_FILE)  # 壊れたままなら置き換える
+                os.replace(tmp, path)  # 壊れたままなら置き換える
             else:
                 with os.fdopen(fd, 'w', encoding='ascii') as w:
                     w.write(data)
@@ -244,11 +255,37 @@ def make_trip(password):
     pw = clean_trip_password(password)
     if not pw:
         return ''
-    key = load_trip_secret()
+    key = load_secret(TRIP_SECRET_FILE)
     if not key:
         error('トリップ用の鍵を保存できません.')
     digest = hmac.new(key, pw.encode('utf-8'), hashlib.sha256).digest()
     return base64.b64encode(digest).decode('ascii')[:10].replace('+', '.').replace('/', '_')
+
+
+def ip_unit(ip):
+    """IPv6 は上位64bitでまとめる (下位は端末が勝手に変えるので)。IPv4 はそのまま。"""
+    if ':' in ip:
+        try:
+            packed = socket.inet_pton(socket.AF_INET6, ip)
+        except (OSError, ValueError):
+            return ip
+        if len(packed) == 16:
+            return packed[:8].hex()
+    return ip
+
+
+def id_key():
+    key = load_secret(ID_SECRET_FILE)
+    if not key:
+        error('ID用の鍵を保存できません.')
+    return key
+
+
+def make_id(ip, board, now):
+    """ID (8文字)。now は日本時間の日時。日付が変わると変わる。"""
+    msg = ID_CTX + ip_unit(ip) + '|' + now.strftime('%Y%m%d') + '|' + board
+    digest = hmac.new(id_key(), msg.encode('utf-8'), hashlib.sha256).digest()
+    return base64.b64encode(digest).decode('ascii')[:ID_LEN].replace('+', '.').replace('/', '_')
 
 
 def is_cap(name_escaped, password):
@@ -316,6 +353,8 @@ def touch_lasttime(folder):
 
 
 def check_global_ip(ip):
+    """同じ接続元の新規スレッドを 180 秒止める。IP は保存せず、鍵つきハッシュで覚える。"""
+    who = hmac.new(id_key(), (RL_CTX + ip_unit(ip)).encode('utf-8'), hashlib.sha256).hexdigest()[:24]
     try:
         fd = os.open('global.mem', os.O_RDWR | os.O_CREAT, 0o600)
     except OSError:
@@ -328,10 +367,10 @@ def check_global_ip(ip):
             parts = line.split()
             if len(parts) == 2 and parts[1].isdigit() and now - int(parts[1]) < 180:
                 iplist[parts[0]] = int(parts[1])
-        if ip in iplist:
-            remain = 180 - (now - iplist[ip])
+        if who in iplist:
+            remain = 180 - (now - iplist[who])
             error(f"あと {remain} 秒たってから投稿してください")
-        iplist[ip] = now
+        iplist[who] = now
         f.seek(0)
         f.truncate()
         for k, v in iplist.items():
@@ -397,7 +436,7 @@ def res_view(folder, form):
     sys.stdout.write("Content-type: text/html; charset=UTF-8\r\n\r\n")
     with open(file_path, 'r', encoding='utf-8') as rf:
         for line in rf:
-            line = line.replace('href="../style.css"', 'href="style.css"')
+            line = line.replace('href="../style.css"', 'href="style.css"').replace('src="../hide.js"', 'src="hide.js"')
             sys.stdout.write(line)
             if '<dl>' in line or '<dt>' in line:
                 break
@@ -642,7 +681,7 @@ def write_index_page(W, folder, page, total, files, v):
     W.write(
         f'<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">\n'
         f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
-        f'<link rel="stylesheet" href="../style.css">\n'
+        f'<link rel="stylesheet" href="../style.css">{SCRIPT_TAG}\n'
         f'<title>{v["title0"]}{v["amezo_name"]}{v["suffix"]}</title></head>\n'
         f'{COPYRIGHT}\n'
         f'<body{v["bg_attr"]} bgcolor="{v["color"]}"{v["text_attr"]}>\n'
@@ -694,6 +733,7 @@ def write_index_page(W, folder, page, total, files, v):
             first_line = re.sub(r'</?(?:html|head|body)[^>]*>', '', first_line)
             first_line = re.sub(r'<(?:meta|link)[^>]*>', '', first_line)
             first_line = re.sub(r'<title>.*?</title>', '', first_line)
+            first_line = re.sub(r'<script[^>]*></script>', '', first_line)
             W.write(first_line)
 
         # 最後の7レスのみを抜粋して表示
@@ -1104,10 +1144,12 @@ def main():
         if left_sec > 0:
             error(f"連投を検知しました。あと {left_sec} 秒ほど待ってから投稿してください")
 
+        ip = client_ip()
         if subj:
-            check_global_ip(client_ip())
+            check_global_ip(ip)
 
         comm = re.sub(r'(https?\:[\w\.\~\-\/\?\+\=\:\@\%\;\#\&]+)', url_link, comm)
+        trip = ''
         if cap_ok:
             name += CAP_MARK
         else:
@@ -1117,7 +1159,8 @@ def main():
         if mail:
             name = f'<a href="mailto:{mail} ">{name} </a>'
 
-        now = datetime.now()
+        now = datetime.now(JST)
+        post_id = make_id(ip, folder, now)
         wdays = ["月", "火", "水", "木", "金", "土", "日"]
         wday = wdays[now.weekday()]
         date_str = now.strftime(f"20%y年%m月%d日({wday})%H時%M分%S秒")
@@ -1175,12 +1218,13 @@ def main():
             subj1 = ('<html><head><meta charset="UTF-8">'
                      '<meta name="viewport" content="width=device-width, initial-scale=1">'
                      f'<title>{subj} </title>'
-                     '<link rel="stylesheet" href="../style.css">'
+                     f'<link rel="stylesheet" href="../style.css">{SCRIPT_TAG}'
                      '</head><body>')
             subj2 = f'<font size=+2 color=red><b>{subj} </b></font>'
 
+        meta = f'<font size=-1 class="meta" data-id="{post_id}"' + (f' data-trip="{trip}"' if trip else '') + '>'
         new_line = (f"{subj1}<dl><dt>{cnt}{subj2}投稿者：<font color=forestgreen><b>{name} </b></font>"
-                    f"<font size=-1>　投稿日：{date_str}</font><br><dd>{comm} </dl>\n")
+                    f"{meta}　投稿日：{date_str} ID:{post_id}</font><br><dd>{comm} </dl>\n")
         W.write(new_line)
         W.write(reply_form(res) + '</body></html>\n')
         W.truncate()

@@ -1,0 +1,503 @@
+--- a/amezo.py
++++ b/amezo.py
+@@ -13,7 +13,8 @@
+ import html
+ import hashlib
+ import base64
+-from datetime import datetime
++import socket
++from datetime import datetime, timedelta, timezone
+ 
+ # スクリプトのあるディレクトリに固定
+ try:
+@@ -57,6 +58,7 @@
+ COMM_MAX = 400             # 本文     超えたらエラー
+ COMM_LINES_MAX = 20        # 本文の改行の数
+ PAGE_CACHE = 10
++JST = timezone(timedelta(hours=9))   # 日時 (投稿日・スレッド番号・IDの日付) は、サーバーの時刻に関係なく日本時間
+ PER_PAGE = 20              # 1ページに表示するスレッドの数
+ HEADLINE_COUNT = 100       # 見出し (HEAD LINE) の数
+ TAIL_MIN_SIZE = 262144     # このサイズを超えるスレッドは、全部読まずに先頭行と末尾だけ読む
+@@ -72,6 +74,15 @@
+ # 同じパスワードなら同じ10文字になる。計算には trip_secret.txt の秘密鍵を使い、
+ # このファイルが無くなると (クローンし直したときなど) 全員のトリップが変わる。
+ TRIP_SECRET_FILE = 'trip_secret.txt'
++# ---- ID ---------------------------------------------------------------------
++# 書き込みごとに ID:xxxxxxxx を付ける。同じ回線 (IP) の人は、同じ日・同じ板なら同じ ID になる (日替わり)。
++# ID = HMAC(id_secret.txt の鍵, 'id:' + IP + '|' + 日付(日本時間) + '|' + 板名) の先頭8文字。IP そのものは保存しない。
++# 鍵はトリップ用の trip_secret.txt とは別のファイル (片方が漏れても、もう片方は無事なように)。
++ID_SECRET_FILE = 'id_secret.txt'
++ID_LEN = 8
++SCRIPT_TAG = '<script src="../hide.js" defer></script>'   # ID・トリップの非表示 (ブラウザの中だけで動く)。新しいスレッドと板のページに入れる
++ID_CTX = 'id:'             # ID 計算の接頭辞 (別の用途の値と混ざらないように)
++RL_CTX = 'rl:'             # 連続投稿制限 (global.mem) の接頭辞
+ TRIP_PASS_MAX = 100        # パスワードの最大文字数 (超えた分は無視)
+ TRIP_MARK = '◆'            # トリップの印 (名前に直接書かれたら ◇ に置き換える)
+ CAP_MARK = '★'             # キャップの印 (名前に直接書かれたら ☆ に置き換える)
+@@ -176,14 +187,14 @@
+ 
+ # ---- トリップ / キャップ -----------------------------------------------------
+ 
+-def load_trip_secret():
+-    """トリップ用の秘密鍵 (32バイト)。無ければ作る。
++def load_secret(path):
++    """秘密鍵 (32バイト) をファイル path から読む。無ければ作る。トリップ用と ID 用で、別のファイルを使う。
+     同時に作られても、最初に置かれた鍵が全員に使われるよう os.link で置く。
+     os.link が使えない環境 (Google Drive のマウントなど) では、最終のファイルを直接作る。
+     どうしても保存できないときは None (鍵が投稿のたびに変わってしまうので、使わせない)。"""
+     def read_key():
+         try:
+-            with open(TRIP_SECRET_FILE, 'r', encoding='ascii') as f:
++            with open(path, 'r', encoding='ascii') as f:
+                 s = f.read().strip()
+             if re.fullmatch(r'[0-9a-f]{64}', s):
+                 return bytes.fromhex(s)
+@@ -196,29 +207,29 @@
+         return key
+     key = os.urandom(32)
+     data = key.hex() + '\n'
+-    tmp = f"{TRIP_SECRET_FILE}.tmp{os.getpid()}"
++    tmp = f"{path}.tmp{os.getpid()}"
+     try:
+         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+         with os.fdopen(fd, 'w', encoding='ascii') as w:
+             w.write(data)
+         try:
+-            os.link(tmp, TRIP_SECRET_FILE)
++            os.link(tmp, path)
+         except FileExistsError:
+             other = read_key()
+             if other:
+                 return other
+-            os.replace(tmp, TRIP_SECRET_FILE)      # 壊れた鍵ファイルは置き換える
++            os.replace(tmp, path)      # 壊れた鍵ファイルは置き換える
+         except OSError:
+             # ハードリンクが使えない環境: 最終のファイルを直接 (既にあれば失敗する形で) 作る
+             try:
+-                fd = os.open(TRIP_SECRET_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
++                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+             except FileExistsError:
+                 for _ in range(20):                # 他のプロセスが書いている途中かもしれないので少し待つ
+                     time.sleep(0.05)
+                     other = read_key()
+                     if other:
+                         return other
+-                os.replace(tmp, TRIP_SECRET_FILE)  # 壊れたままなら置き換える
++                os.replace(tmp, path)  # 壊れたままなら置き換える
+             else:
+                 with os.fdopen(fd, 'w', encoding='ascii') as w:
+                     w.write(data)
+@@ -244,13 +255,39 @@
+     pw = clean_trip_password(password)
+     if not pw:
+         return ''
+-    key = load_trip_secret()
++    key = load_secret(TRIP_SECRET_FILE)
+     if not key:
+         error('トリップ用の鍵を保存できません.')
+     digest = hmac.new(key, pw.encode('utf-8'), hashlib.sha256).digest()
+     return base64.b64encode(digest).decode('ascii')[:10].replace('+', '.').replace('/', '_')
+ 
+ 
++def ip_unit(ip):
++    """IPv6 は上位64bitでまとめる (下位は端末が勝手に変えるので)。IPv4 はそのまま。"""
++    if ':' in ip:
++        try:
++            packed = socket.inet_pton(socket.AF_INET6, ip)
++        except (OSError, ValueError):
++            return ip
++        if len(packed) == 16:
++            return packed[:8].hex()
++    return ip
++
++
++def id_key():
++    key = load_secret(ID_SECRET_FILE)
++    if not key:
++        error('ID用の鍵を保存できません.')
++    return key
++
++
++def make_id(ip, board, now):
++    """ID (8文字)。now は日本時間の日時。日付が変わると変わる。"""
++    msg = ID_CTX + ip_unit(ip) + '|' + now.strftime('%Y%m%d') + '|' + board
++    digest = hmac.new(id_key(), msg.encode('utf-8'), hashlib.sha256).digest()
++    return base64.b64encode(digest).decode('ascii')[:ID_LEN].replace('+', '.').replace('/', '_')
++
++
+ def is_cap(name_escaped, password):
+     """名前とパスワードが cap.txt の組と一致するか (名前が一致したときだけ重い計算をする)"""
+     if not password:
+@@ -316,6 +353,8 @@
+ 
+ 
+ def check_global_ip(ip):
++    """同じ接続元の新規スレッドを 180 秒止める。IP は保存せず、鍵つきハッシュで覚える。"""
++    who = hmac.new(id_key(), (RL_CTX + ip_unit(ip)).encode('utf-8'), hashlib.sha256).hexdigest()[:24]
+     try:
+         fd = os.open('global.mem', os.O_RDWR | os.O_CREAT, 0o600)
+     except OSError:
+@@ -328,10 +367,10 @@
+             parts = line.split()
+             if len(parts) == 2 and parts[1].isdigit() and now - int(parts[1]) < 180:
+                 iplist[parts[0]] = int(parts[1])
+-        if ip in iplist:
+-            remain = 180 - (now - iplist[ip])
++        if who in iplist:
++            remain = 180 - (now - iplist[who])
+             error(f"あと {remain} 秒たってから投稿してください")
+-        iplist[ip] = now
++        iplist[who] = now
+         f.seek(0)
+         f.truncate()
+         for k, v in iplist.items():
+@@ -397,7 +436,7 @@
+     sys.stdout.write("Content-type: text/html; charset=UTF-8\r\n\r\n")
+     with open(file_path, 'r', encoding='utf-8') as rf:
+         for line in rf:
+-            line = line.replace('href="../style.css"', 'href="style.css"')
++            line = line.replace('href="../style.css"', 'href="style.css"').replace('src="../hide.js"', 'src="hide.js"')
+             sys.stdout.write(line)
+             if '<dl>' in line or '<dt>' in line:
+                 break
+@@ -642,7 +681,7 @@
+     W.write(
+         f'<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">\n'
+         f'<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+-        f'<link rel="stylesheet" href="../style.css">\n'
++        f'<link rel="stylesheet" href="../style.css">{SCRIPT_TAG}\n'
+         f'<title>{v["title0"]}{v["amezo_name"]}{v["suffix"]}</title></head>\n'
+         f'{COPYRIGHT}\n'
+         f'<body{v["bg_attr"]} bgcolor="{v["color"]}"{v["text_attr"]}>\n'
+@@ -694,6 +733,7 @@
+             first_line = re.sub(r'</?(?:html|head|body)[^>]*>', '', first_line)
+             first_line = re.sub(r'<(?:meta|link)[^>]*>', '', first_line)
+             first_line = re.sub(r'<title>.*?</title>', '', first_line)
++            first_line = re.sub(r'<script[^>]*></script>', '', first_line)
+             W.write(first_line)
+ 
+         # 最後の7レスのみを抜粋して表示
+@@ -1104,10 +1144,12 @@
+         if left_sec > 0:
+             error(f"連投を検知しました。あと {left_sec} 秒ほど待ってから投稿してください")
+ 
++        ip = client_ip()
+         if subj:
+-            check_global_ip(client_ip())
++            check_global_ip(ip)
+ 
+         comm = re.sub(r'(https?\:[\w\.\~\-\/\?\+\=\:\@\%\;\#\&]+)', url_link, comm)
++        trip = ''
+         if cap_ok:
+             name += CAP_MARK
+         else:
+@@ -1117,7 +1159,8 @@
+         if mail:
+             name = f'<a href="mailto:{mail} ">{name} </a>'
+ 
+-        now = datetime.now()
++        now = datetime.now(JST)
++        post_id = make_id(ip, folder, now)
+         wdays = ["月", "火", "水", "木", "金", "土", "日"]
+         wday = wdays[now.weekday()]
+         date_str = now.strftime(f"20%y年%m月%d日({wday})%H時%M分%S秒")
+@@ -1175,12 +1218,13 @@
+             subj1 = ('<html><head><meta charset="UTF-8">'
+                      '<meta name="viewport" content="width=device-width, initial-scale=1">'
+                      f'<title>{subj} </title>'
+-                     '<link rel="stylesheet" href="../style.css">'
++                     f'<link rel="stylesheet" href="../style.css">{SCRIPT_TAG}'
+                      '</head><body>')
+             subj2 = f'<font size=+2 color=red><b>{subj} </b></font>'
+ 
++        meta = f'<font size=-1 class="meta" data-id="{post_id}"' + (f' data-trip="{trip}"' if trip else '') + '>'
+         new_line = (f"{subj1}<dl><dt>{cnt}{subj2}投稿者：<font color=forestgreen><b>{name} </b></font>"
+-                    f"<font size=-1>　投稿日：{date_str}</font><br><dd>{comm} </dl>\n")
++                    f"{meta}　投稿日：{date_str} ID:{post_id}</font><br><dd>{comm} </dl>\n")
+         W.write(new_line)
+         W.write(reply_form(res) + '</body></html>\n')
+         W.truncate()
+--- a/admin.py
++++ b/admin.py
+@@ -213,7 +213,7 @@
+ 
+ 
+ def parse_thread(path):
+-    """(題名, [(番号, 名前, 日時, 本文), ...])"""
++    """(題名, [(番号, 名前, 日時, ID, 本文), ...])"""
+     title = ''
+     rows = []
+     try:
+@@ -231,18 +231,21 @@
+                 name = html.unescape(re.sub(r'<[^>]*>', '', nm.group(1))).strip() if nm else ''
+                 dm = re.search(r'投稿日：([^<]*)</font>', line)
+                 date = dm.group(1).strip() if dm else ''
++                im = re.search(r'data-id="([^"]*)"', line)
++                post_id = im.group(1) if im else ''        # ID が付く前の古い書き込みは空
++                date = re.sub(r' ID:[A-Za-z0-9._]+$', '', date).strip()     # ID は別の列に出す
+                 bm = re.search(r'<dd>(.*?) </dl>', line)
+                 body = bm.group(1) if bm else ''
+                 body = body.replace('<br>', ' ')
+                 body = html.unescape(re.sub(r'<[^>]*>', '', body))
+-                rows.append((num, name, date, body))
++                rows.append((num, name, date, post_id, body))
+     except (OSError, UnicodeDecodeError):
+         pass
+     return title, rows
+ 
+ 
+ def fmt_time(ts):
+-    return datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M')
++    return datetime.fromtimestamp(ts, amezo.JST).strftime('%Y-%m-%d %H:%M')     # 日本時間
+ 
+ 
+ # ---- 画面 ------------------------------------------------------------------
+@@ -297,14 +300,14 @@
+     title, rows = parse_thread(path)
+ 
+     trs = ''
+-    for num, name, date, body in rows:
++    for num, name, date, post_id, body in rows:
+         cb = '—' if num == 1 else f'<input type="checkbox" name="del" value="{num}">'
+         short = body[:BODY_PREVIEW] + ('…' if len(body) > BODY_PREVIEW else '')
+         trs += (f'<tr><td>{cb}</td><td>{num}</td><td>{E(name)}</td>'
+-                f'<td>{E(date)}</td><td class="body">{E(short)}</td></tr>')
++                f'<td>{E(date)}</td><td>{E(post_id)}</td><td class="body">{E(short)}</td></tr>')
+ 
+     form = (f'<form method="post" action="admin.cgi">{hidden(pw, act="delete", folder=folder, res=res)}'
+-            '<table><tr><th>削除</th><th>No</th><th>名前</th><th>日時</th><th>本文</th></tr>'
++            '<table><tr><th>削除</th><th>No</th><th>名前</th><th>日時</th><th>ID</th><th>本文</th></tr>'
+             + trs + '</table>'
+             '<p><button type="submit" onclick="return confirm(\'選択したレスを削除します。よろしいですか?\')">'
+             '選択したレスを削除</button></p></form>')
+@@ -353,7 +356,7 @@
+     ts = orig_mtime
+     if stamp:
+         try:
+-            ts = datetime(*stamp).timestamp()
++            ts = datetime(*stamp, tzinfo=amezo.JST).timestamp()     # 投稿日は日本時間で書かれている
+         except ValueError:
+             pass
+     try:
+--- a/setup_expose.py
++++ b/setup_expose.py
+@@ -6,7 +6,7 @@
+ #   - /amezo.cgi と /amezo.py はどちらも amezo.py を実行する
+ #     (フォームの action="../amezo.cgi" のまま動く。古い Perl 版 .cgi は実行されない)
+ #   - 静的ファイルは「許可リスト方式」で配信する。許可するのは次のものだけ:
+-#       /  /index.html  /style.css
++#       /  /index.html  /style.css  /hide.js
+ #       blist.txt に載っている板フォルダの index.html / index2.html / 数字.html
+ #     delpass.txt, global.mem, ng.txt, x〜.html (非表示スレッド), ソースなどは 404 になる
+ 
+@@ -31,7 +31,7 @@
+ ALLOWED_CGI = {"amezo", "dai", "admin"}
+ 
+ # 板フォルダの外で配信を許可するパス
+-STATIC_ROOT_FILES = {"/", "/index.html", "/style.css"}
++STATIC_ROOT_FILES = {"/", "/index.html", "/style.css", "/hide.js"}
+ 
+ # 板フォルダの中で配信を許可するファイル名
+ # (o数字.html は退避した過去ログ、kako.html はその一覧。x〜.html は含まない)
+@@ -66,7 +66,7 @@
+             print(f"  ⚠️ {cgi_script} が見つかりません")
+ 
+     # フレーム構成に必要なファイルの確認
+-    for needed in ["index.html", "style.css", "header.html", "blist.txt"]:
++    for needed in ["index.html", "style.css", "hide.js", "header.html", "blist.txt"]:
+         if not os.path.exists(needed):
+             print(f"  ⚠️ {needed} が見つかりません")
+ 
+--- a/style.css
++++ b/style.css
+@@ -13,3 +13,8 @@
+ form.post input[type=submit] { padding: 6px 20px; }
+ form.post .links { margin: 10px 0 0; font-size: small; }
+ form.post .links a { margin-right: 0.8em; white-space: nowrap; }
++
++/* ID / トリップ非表示 (hide.js) */
++.abone dd, .abone dt font { display: none; }
++.abone dt::after { content: " あぼーん"; color: gray; }
++.hidebtns a { font-size: x-small; margin-left: 0.4em; white-space: nowrap; }
+--- a/README.md
++++ b/README.md
+@@ -13,7 +13,7 @@
+ | `dai.py` (`/dai.cgi`) | 左側の板一覧と、各板の見出し(HEAD LINE)を出す |
+ | `amezo.py` (`/amezo.cgi`) | 投稿の受付、スレッドファイルの更新、板の `index.html` の再生成 |
+ | `admin.py` (`/admin.cgi`) | 管理画面。レスの削除、スレッドの非表示と復元 |
+-| `style.css`、`header.html` | 共通の見た目と、板の上部(リンク・注意書き・新規投稿フォーム) |
++| `style.css`、`header.html`、`hide.js` | 共通の見た目と、板の上部(リンク・注意書き・新規投稿フォーム)。`hide.js` は、ID・トリップの非表示 (ブラウザの中だけで動く) |
+ 
+ ## 2. データファイル
+ 
+@@ -24,7 +24,8 @@
+ | `delpass.txt` | 管理用パスワードのハッシュ (`pbkdf2_sha256$…`)。`amezo.py --make-hash` で作る |
+ | `trip_secret.txt` | トリップ用の秘密鍵。最初の `#` つき投稿のときに自動で作る (権限 600)。GitHub に入れない (`.gitignore`)。無くなると全員のトリップが変わる。ハードリンクが使えない環境 (Google Drive のマウントなど) でも作れる。どうしても保存できないときは、トリップ付きの投稿だけを「トリップ用の鍵を保存できません」で断る (鍵が投稿のたびに変わるのを防ぐ) |
+ | `cap.txt` | キャップの定義。`表示名,パスワードのハッシュ` の1行1件 (`#` で始まる行はコメント)。無くてもよい |
+-| `global.mem` | 新規スレッド作成の IP 制限用。IP と時刻を 180 秒だけ保持 |
++| `id_secret.txt` | ID と連続投稿の制限に使う秘密鍵。最初の投稿のときに自動で作る (権限 600)。GitHub に入れない (`.gitignore`)。トリップ用の `trip_secret.txt` とは別の鍵。作り方と、保存できないときの扱いは、`trip_secret.txt` と同じ (保存できないときは、投稿を「ID用の鍵を保存できません」で断る) |
++| `global.mem` | 新規スレッド作成の連続投稿制限用。IP は保存せず、鍵つきハッシュと時刻を 180 秒だけ保持 |
+ | `admin_fail.mem` | 管理画面のログイン失敗の記録 (IP、回数、時刻) |
+ | `板/数字.html` | スレッド (数字は作成日時 `yyMMddHHmmss`) |
+ | `板/x数字.html` | 非表示にしたスレッド |
+@@ -43,7 +44,7 @@
+ 
+ **リクエストの振り分け**
+ - `/amezo.cgi`、`/amezo.py`、`/dai.cgi`、`/admin.cgi` などは、CGI として実行します。実行できるのは `ALLOWED_CGI` の3つだけです。環境変数 (`REQUEST_METHOD`、`QUERY_STRING`、`REMOTE_ADDR`、`HTTP_*` など) を渡し、標準入力に POST を渡して、30 秒で打ち切ります。POST は 64KB を超えると 413 を返します。
+-- それ以外は**許可リスト方式の静的配信**です。許可するのは、`/`、`/index.html`、`/style.css`、`blist.txt` にある板の `index.html`、`index数字.html`、`数字.html`、過去ログの `o数字.html` と `kako.html` だけです。`delpass.txt` や `x〜.html`、ソースファイルは 404 を返し、ディレクトリの一覧も出しません。
++- それ以外は**許可リスト方式の静的配信**です。許可するのは、`/`、`/index.html`、`/style.css`、`/hide.js`、`blist.txt` にある板の `index.html`、`index数字.html`、`数字.html`、過去ログの `o数字.html` と `kako.html` だけです。`delpass.txt` や `x〜.html`、ソースファイルは 404 を返し、ディレクトリの一覧も出しません。
+ 
+ ## 4. 画面の構成
+ 
+@@ -59,8 +60,10 @@
+ 4. **入力の検査**: 改行 20 個まで、題名 45 文字まで、本文 400 文字まで、メール 50 文字まででエラーにし、投稿者名は 25 文字を超えた分を切り捨てます。文字数は、全角・半角・絵文字を区別せず1文字と数え (`&amp;` などのエスケープも1文字、本文の改行も1文字)、題名と名前は空白を除いた文字数です。上限は `amezo.py` の `SUBJ_MAX`、`NAME_MAX`、`MAIL_MAX`、`COMM_MAX` で変えられます。名前の空白は除去し、`ng.txt` の削除ワードを取り除きます (投稿はエスケープされた文で比べるので、`&` や `<` を含むワードも、エスケープして照合します)。管理者名「サポート」を名乗る投稿は、`＃サポート` に変えます (キャップに一致したときを除く)。
+    - **トリップ**: 名前欄の最初の半角 `#` より後ろをパスワードとし、名前の後ろに `◆` と10文字を付けます (全角の `＃` は区切りにしません)。パスワードは名前の文字数に数えず、NG ワードの対象にもせず、保存もしません。パスワードは、空白を除き、全角の英数字・記号を半角にそろえ、100 文字までを使います。計算は `HMAC-SHA256(trip_secret.txt の鍵, パスワード)` の先頭10文字です。同じパスワードなら同じ10文字になりますが、**鍵が変わる (`trip_secret.txt` が無くなる、クローンし直すなど) と、全員のトリップが変わります**。パスワードが空、または空白だけのときは、トリップを付けません。
+    - **偽造防止**: 名前に直接書かれた `◆` は `◇` に、`★` は `☆` に置き換えます。
++    - **ID**: 書き込みごとに `ID:xxxxxxxx` が付きます。同じ回線 (IP) の人は、同じ日・同じ板なら同じ ID になり、日付が変わると変わります。計算は `HMAC(id_secret.txt の鍵, 'id:' + IP + '|' + 日付 + '|' + 板名)` の先頭8文字で、IP そのものは保存しません。IPv6 は上位64bitでまとめます。板が違えば ID も違うので、板をまたいで追跡できません。
++    - **日時**: 投稿日、スレッド番号、ID の日付は、サーバーの時刻に関係なく、**日本時間**です。これを入れる前に書かれた投稿の日付は、そのときのサーバーの時刻のままなので、同じスレッドの中で、表示が混ざります。
+    - **キャップ**: `cap.txt` の表示名と、名前が一致し (空白は無視して比べます)、`#` の後ろのパスワードがそのハッシュに合うとき、`◆` の代わりに `★` を付けます。このときだけ、名前に「サポート」などの管理者名を使えます (管理者名の置き換えをしません)。ハッシュは `python3 amezo.py --make-hash パスワード` で作ります。キャップはトリップの値を使わないので、鍵が変わっても有効です。
+-5. **制限**: 同じ板で 5 秒以内の連投は拒否します (`lasttime.txt`)。新規スレッドは、同じ IP から 180 秒に 1 回だけです (`global.mem`)。
++5. **制限**: 同じ板で 5 秒以内の連投は拒否します (`lasttime.txt`)。新規スレッドは、同じ接続元 (IPv6 は上位64bit) から 180 秒に 1 回だけです (`global.mem`)。
+ 6. **書き込み**:
+    - 新規スレッドは、`yyMMddHHmmss` のファイルを `O_EXCL` で作ります。重複したら番号を足して、30 回まで試します。
+    - 返信は、既存ファイルをロックして、最後のレス番号を数え、直前のレスと名前・本文が同じなら「二重カキコ」で拒否します。
+@@ -99,6 +102,7 @@
+ - **入っているもの**: 静的配信の許可リスト、入力の HTML エスケープ、板名の検証、スレッド作成の `O_EXCL`、`flock` による排他制御、POST のサイズ上限、パスワードのハッシュ化と失敗回数の制限。
+ - **入っていないもの**: Origin/Referer の検証 (一時的に無効)。他のサイトのフォームから、投稿を送らせることが可能です。管理画面の操作は、パスワードがフォームに入っているので影響しません。
+ - **IP の判定**: `amezo.py` の `client_ip()` は、接続元が `127.0.0.1` のときだけ、`CF-Connecting-IP` や `X-Forwarded-For` を信用します。プロキシ経由で全員が同じ IP に見えると、IP 制限が、全員に一斉に効くことがあります。
++- **ID・トリップの非表示 (`hide.js`)**: 書き込みの横に `[IDを非表示]` `[トリップ非表示]` が出ます。押すと、同じ ID (またはトリップ) の書き込みの本文が隠れて「あぼーん」と出ます。非表示の一覧は、ブラウザの `localStorage` (`bbs_hide`) にだけ保存します (サーバーには何も送りません。ID は日替わりなので、3日で捨てます)。書き込みの `data-id` と `data-trip` を使い、`style.css` の `.abone` などで隠します。`<script>` は、新しいスレッドと板のページにだけ入るので、すでにあるスレッドには、ボタンが出ません。
+ 
+ ## 10. 使い始める手順
+ 
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,2 +1,4 @@
+ trip_secret.txt
+ trip_secret.txt.tmp*
++id_secret.txt
++id_secret.txt.tmp*
+--- /dev/null
++++ b/hide.js
+@@ -0,0 +1,53 @@
++// hide.js - ID / トリップの非表示 (ブラウザの localStorage だけで動く。サーバーは何もしない)
++(() => {
++  const K = 'bbs_hide', TTL = 3 * 864e5, now = Date.now();
++  // 保存されているのは {"id:…": 時刻, "trip:…": 時刻} というオブジェクトだけ。それ以外 (null・配列・数値・文字列・true・壊れた JSON、
++  // 他のスクリプトや古い版が書いた値) が入っていても、捨てて空から始める。JSON.parse('null') は null を返すので、
++  // そのまま H に入れると H['id:…'] で例外になり、全体が動かなくなる。配列や数値だと、エラーは出ないまま、隠せず・保存もされない。
++  let H = {};
++  try {
++    const o = JSON.parse(localStorage.getItem(K) || '{}');
++    if (o !== null && typeof o === 'object' && !Array.isArray(o)) {
++      for (const k of Object.keys(o).slice(0, 5000)) {                       // 件数の上限 (巨大な値で重くならないように)
++        const t = o[k];
++        if (!/^(id|trip):/.test(k) || typeof t !== 'number' || !Number.isFinite(t) || t <= 0) continue;   // __proto__ などの変なキー・時刻でない値は捨てる
++        if (k.startsWith('id:') && now - t > TTL) continue;                  // ID は日替わりなので3日で捨てる
++        H[k] = t;
++      }
++    }
++  } catch { H = {}; }
++  const save = () => { try { localStorage.setItem(K, JSON.stringify(H)); } catch {} };
++
++  const metas = [...document.querySelectorAll('.meta[data-id]')];
++  for (const m of metas) {
++    const s = document.createElement('span');
++    s.className = 'hidebtns';
++    for (const [label, key] of [['ID', 'id:' + m.dataset.id], ['トリップ', m.dataset.trip && 'trip:' + m.dataset.trip]]) {
++      if (!key) continue;
++      const a = document.createElement('a');
++      a.href = '#'; a.dataset.hide = key; a.dataset.label = label;
++      s.append(' ', a);
++    }
++    m.after(s);
++  }
++
++  function apply() {
++    for (const m of metas) {
++      const dl = m.closest('dl');
++      if (dl) dl.classList.toggle('abone', !!(H['id:' + m.dataset.id] || (m.dataset.trip && H['trip:' + m.dataset.trip])));
++    }
++    document.querySelectorAll('a[data-hide]').forEach(a => {
++      a.textContent = '[' + a.dataset.label + (H[a.dataset.hide] ? '解除' : '非表示') + ']';
++    });
++  }
++
++  document.addEventListener('click', e => {
++    const a = e.target.closest('a[data-hide]');
++    if (!a) return;
++    e.preventDefault();
++    const k = a.dataset.hide;
++    if (H[k]) delete H[k]; else H[k] = Date.now();
++    save(); apply();
++  });
++  apply();
++})();
+--- /dev/null
++++ b/tests/hide_test.js
+@@ -0,0 +1,66 @@
++// hide.js の確認 (Node + jsdom): localStorage に、想定外の値 (null・配列・数値・壊れた JSON など) が入っていても、
++// 例外を出さず、ボタンの文字が出て、隠す操作が効き、保存される。
++//   使い方: npm i jsdom && node tests/hide_test.js [hide.js のパス]
++const {JSDOM} = require('jsdom'); const fs = require('fs'); const path = require('path');
++const file = process.argv[2] || path.join(__dirname, '..', 'hide.js');
++const code = fs.readFileSync(file, 'utf8');
++const post = (n, id, trip) => `<dl><dt>${n}投稿者：<font color=forestgreen><b>n${n} </b></font><font size=-1 class="meta" data-id="${id}"${trip ? ` data-trip="${trip}"` : ''}>　投稿日：d ID:${id}</font><br><dd>c${n} </dl>`;
++const HTML = `<html><body>${post(1, 'idA1', 'tripX')}${post(2, 'idB2', '')}${post(3, 'idA1', 'tripX')}</body></html>`;   // idA1 と tripX は、1番と3番が同じ
++const now = Date.now(), DAY = 864e5;
++let bad = 0, n = 0;
++function ok(label, cond, extra = '') { n++; if (!cond) bad++; console.log((cond ? 'OK   ' : 'NG   ') + label + (extra ? '  ' + extra : '')); }
++
++function run(stored, {before} = {}) {
++  const dom = new JSDOM(HTML, {runScripts: 'outside-only', url: 'http://localhost/'});
++  const w = dom.window, errs = [];
++  w.addEventListener('error', e => errs.push(e.message));
++  if (before) before(w);
++  if (stored !== undefined && !before) w.localStorage.setItem('bbs_hide', stored);
++  try { w.eval(code); } catch (e) { errs.push(String(e.message)); }
++  const d = w.document;
++  const btns = [...d.querySelectorAll('a[data-hide]')];
++  const r = {errs, buttons: btns.length, labeled: btns.length > 0 && btns.every(a => a.textContent.length > 0), hiddenAtLoad: d.querySelectorAll('dl.abone').length};
++  const first = d.querySelector('a[data-hide^="id:"]');
++  if (first) first.dispatchEvent(new w.MouseEvent('click', {bubbles: true, cancelable: true}));
++  r.errs = errs; r.hiddenAfterClick = d.querySelectorAll('dl.abone').length;
++  try { r.saved = JSON.parse(w.localStorage.getItem('bbs_hide')); } catch { r.saved = undefined; }
++  r.w = w; return r;
++}
++const isObj = o => o !== null && typeof o === 'object' && !Array.isArray(o);
++
++// --- 壊れた・想定外の値: 例外なし / 文字が出る / 隠せる / 保存される (保存された値は、正しい形のオブジェクト) ---
++const weird = [['(未設定)', undefined], ['"null" (setItem(k, null))', 'null'], ['"[]"', '[]'], ['"[1,2]"', '[1,2]'], ['"123"', '123'], ['"\\"str\\""', '"str"'],
++               ['"true"', 'true'], ['"false"', 'false'], ['"{}"', '{}'], ['"{bad" (壊れた JSON)', '{bad'], ['"" (空文字)', ''], ['"undefined"', 'undefined'], ['"NaN"', 'NaN'],
++               ['{"id:idA1":"x"} (時刻が文字列)', '{"id:idA1":"x"}'], ['{"id:idA1":null}', '{"id:idA1":null}'], ['{"id:idA1":-5}', '{"id:idA1":-5}'],
++               ['{"id:idA1":{}} (時刻がオブジェクト)', '{"id:idA1":{}}'], ['{"foo":1} (知らないキー)', '{"foo":1}']];
++for (const [label, v] of weird) {
++  const r = run(v);
++  ok(`${label}: 例外なし・文字が出る・隠せる・正しい形で保存`, r.errs.length === 0 && r.labeled && r.hiddenAtLoad === 0 && r.hiddenAfterClick >= 1 && isObj(r.saved) && typeof r.saved['id:idA1'] === 'number',
++     r.errs[0] ? r.errs[0].slice(0, 50) : `読込時の隠れ ${r.hiddenAtLoad}, クリック後 ${r.hiddenAfterClick}, 保存 ${JSON.stringify(r.saved)}`);
++}
++// --- 正しい値: 従来どおり ---
++let r = run(JSON.stringify({'id:idA1': now}));
++ok('正しい: ID を隠していた → 読み込み時に隠れている (同じ ID の2件)。ボタンで解除できる', r.hiddenAtLoad === 2 && r.hiddenAfterClick === 0 && r.errs.length === 0 && !('id:idA1' in r.saved));
++r = run(JSON.stringify({'trip:tripX': now}));
++ok('正しい: トリップを隠していた → 読み込み時に隠れている (同じトリップの2件)', r.hiddenAtLoad === 2 && r.errs.length === 0);
++r = run(JSON.stringify({'id:idA1': now - 4 * DAY}));
++ok('ID は3日たつと捨てる', r.hiddenAtLoad === 0 && r.errs.length === 0);
++r = run(JSON.stringify({'trip:tripX': now - 400 * DAY}));
++ok('トリップは期限なし (400日前でも残る)', r.hiddenAtLoad === 2);
++r = run(JSON.stringify({'id:idA1': now - 4 * DAY, 'trip:tripX': now - 400 * DAY}));
++ok('期限切れの ID は捨て、トリップは残る (ID で隠すと保存し直され、トリップはそのまま保存される)', r.hiddenAtLoad === 2 && r.saved && 'trip:tripX' in r.saved && typeof r.saved['id:idA1'] === 'number' && r.saved['id:idA1'] > now - DAY);
++// --- 変なキー・巨大な値 ---
++r = run('{"__proto__":{"polluted":1},"id:idA1":' + now + '}');
++ok('__proto__ を含む値でも、Object.prototype を汚さない', ({}).polluted === undefined && r.errs.length === 0 && r.hiddenAtLoad === 2, String(({}).polluted));
++r = run(JSON.stringify({'constructor': now, 'toString': now, 'id:': now, 'hasOwnProperty': now}));
++const own = k => Object.prototype.hasOwnProperty.call(r.saved || {}, k);
++ok('constructor / toString / hasOwnProperty などのキーは捨てる (自分で持つキーとして保存しない)', r.errs.length === 0 && r.hiddenAtLoad === 0 && !own('constructor') && !own('toString') && !own('hasOwnProperty'));
++const big = {}; for (let i = 0; i < 6000; i++) big['id:k' + i] = now;
++const t0 = Date.now(); r = run(JSON.stringify(big));
++ok('6000件の巨大な値でも、上限 (5000件) で止まり、重くならない', r.errs.length === 0 && Object.keys(r.saved || {}).length <= 5001 && Date.now() - t0 < 3000, `保存 ${Object.keys(r.saved || {}).length}件, ${Date.now() - t0}ms`);
++// --- localStorage 自体が使えない (ブラウザの設定・プライベートモードなど) ---
++r = run(undefined, {before: w => Object.defineProperty(w, 'localStorage', {get() { throw new w.Error('SecurityError'); }})});
++ok('localStorage に触るだけで例外 (使えない設定): 例外なし・文字が出る・その場では隠せる', r.errs.length === 0 && r.labeled && r.hiddenAfterClick >= 1, r.errs[0] || '');
++r = run(undefined, {before: w => { w.Storage.prototype.setItem = function () { throw new w.Error('QuotaExceededError'); }; }});
++ok('保存だけが失敗 (容量いっぱい): 例外なし・その場では隠せる', r.errs.length === 0 && r.labeled && r.hiddenAfterClick >= 1, r.errs[0] || '');
++console.log(`\n${n} 項目, NG ${bad} 件 (${path.basename(path.dirname(file))}/${path.basename(file)})`); process.exit(bad ? 1 : 0);

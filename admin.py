@@ -213,7 +213,7 @@ def thread_summary(path):
 
 
 def parse_thread(path):
-    """(題名, [(番号, 名前, 日時, 本文), ...])"""
+    """(題名, [(番号, 名前, 日時, ID, 本文), ...])"""
     title = ''
     rows = []
     try:
@@ -231,18 +231,21 @@ def parse_thread(path):
                 name = html.unescape(re.sub(r'<[^>]*>', '', nm.group(1))).strip() if nm else ''
                 dm = re.search(r'投稿日：([^<]*)</font>', line)
                 date = dm.group(1).strip() if dm else ''
+                im = re.search(r'data-id="([^"]*)"', line)
+                post_id = im.group(1) if im else ''        # ID が付く前の古い書き込みは空
+                date = re.sub(r' ID:[A-Za-z0-9._]+$', '', date).strip()     # ID は別の列に出す
                 bm = re.search(r'<dd>(.*?) </dl>', line)
                 body = bm.group(1) if bm else ''
                 body = body.replace('<br>', ' ')
                 body = html.unescape(re.sub(r'<[^>]*>', '', body))
-                rows.append((num, name, date, body))
+                rows.append((num, name, date, post_id, body))
     except (OSError, UnicodeDecodeError):
         pass
     return title, rows
 
 
 def fmt_time(ts):
-    return datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M')
+    return datetime.fromtimestamp(ts, amezo.JST).strftime('%Y-%m-%d %H:%M')     # 日本時間
 
 
 # ---- 画面 ------------------------------------------------------------------
@@ -297,14 +300,14 @@ def show_replies(pw, folder, res, message='', ok=True):
     title, rows = parse_thread(path)
 
     trs = ''
-    for num, name, date, body in rows:
+    for num, name, date, post_id, body in rows:
         cb = '—' if num == 1 else f'<input type="checkbox" name="del" value="{num}">'
         short = body[:BODY_PREVIEW] + ('…' if len(body) > BODY_PREVIEW else '')
         trs += (f'<tr><td>{cb}</td><td>{num}</td><td>{E(name)}</td>'
-                f'<td>{E(date)}</td><td class="body">{E(short)}</td></tr>')
+                f'<td>{E(date)}</td><td>{E(post_id)}</td><td class="body">{E(short)}</td></tr>')
 
     form = (f'<form method="post" action="admin.cgi">{hidden(pw, act="delete", folder=folder, res=res)}'
-            '<table><tr><th>削除</th><th>No</th><th>名前</th><th>日時</th><th>本文</th></tr>'
+            '<table><tr><th>削除</th><th>No</th><th>名前</th><th>日時</th><th>ID</th><th>本文</th></tr>'
             + trs + '</table>'
             '<p><button type="submit" onclick="return confirm(\'選択したレスを削除します。よろしいですか?\')">'
             '選択したレスを削除</button></p></form>')
@@ -353,7 +356,7 @@ def do_delete(folder, res, nums):
     ts = orig_mtime
     if stamp:
         try:
-            ts = datetime(*stamp).timestamp()
+            ts = datetime(*stamp, tzinfo=amezo.JST).timestamp()     # 投稿日は日本時間で書かれている
         except ValueError:
             pass
     try:

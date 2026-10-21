@@ -6,7 +6,7 @@
 #   - /amezo.cgi と /amezo.py はどちらも amezo.py を実行する
 #     (フォームの action="../amezo.cgi" のまま動く。古い Perl 版 .cgi は実行されない)
 #   - 静的ファイルは「許可リスト方式」で配信する。許可するのは次のものだけ:
-#       /  /index.html  /style.css
+#       /  /index.html  /style.css  /hide.js
 #       blist.txt に載っている板フォルダの index.html / index2.html / 数字.html
 #     delpass.txt, global.mem, ng.txt, x〜.html (非表示スレッド), ソースなどは 404 になる
 
@@ -31,7 +31,7 @@ MAX_POST_BYTES = 64 * 1024
 ALLOWED_CGI = {"amezo", "dai", "admin"}
 
 # 板フォルダの外で配信を許可するパス
-STATIC_ROOT_FILES = {"/", "/index.html", "/style.css"}
+STATIC_ROOT_FILES = {"/", "/index.html", "/style.css", "/hide.js"}
 
 # 板フォルダの中で配信を許可するファイル名
 # (o数字.html は退避した過去ログ、kako.html はその一覧。x〜.html は含まない)
@@ -66,7 +66,7 @@ def setup_bbs_directories():
             print(f"  ⚠️ {cgi_script} が見つかりません")
 
     # フレーム構成に必要なファイルの確認
-    for needed in ["index.html", "style.css", "header.html", "blist.txt"]:
+    for needed in ["index.html", "style.css", "hide.js", "header.html", "blist.txt"]:
         if not os.path.exists(needed):
             print(f"  ⚠️ {needed} が見つかりません")
 

@@ -13,3 +13,8 @@ form.post textarea { display: block; width: 100%; max-width: 44em; margin: 0 0 1
 form.post input[type=submit] { padding: 6px 20px; }
 form.post .links { margin: 10px 0 0; font-size: small; }
 form.post .links a { margin-right: 0.8em; white-space: nowrap; }
+
+/* ID / トリップ非表示 (hide.js) */
+.abone dd, .abone dt font { display: none; }
+.abone dt::after { content: " あぼーん"; color: gray; }
+.hidebtns a { font-size: x-small; margin-left: 0.4em; white-space: nowrap; }
