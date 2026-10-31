@@ -1,0 +1,3104 @@
+diff --git a/.gitignore b/.gitignore
+index a132be3..cec9106 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -2,3 +2,12 @@ trip_secret.txt
+ trip_secret.txt.tmp*
+ id_secret.txt
+ id_secret.txt.tmp*
++key_secret.txt
++jump_secret.txt
++global.mem
++admin_fail.mem
++config.ini
++keys.txt
++*.lock
++*.tmp*
++__pycache__/
+diff --git a/README.md b/README.md
+index 8327806..f053d26 100644
+--- a/README.md
++++ b/README.md
+@@ -12,7 +12,11 @@ Origin/Referer の検証は、コメントアウトで無効になっている
+ | `index.html` | 親ページ。左に板一覧、右に板を並べたフレーム画面 |
+ | `dai.py` (`/dai.cgi`) | 左側の板一覧と、各板の見出し(HEAD LINE)を出す |
+ | `amezo.py` (`/amezo.cgi`) | 投稿の受付、スレッドファイルの更新、板の `index.html` の再生成 |
+-| `admin.py` (`/admin.cgi`) | 管理画面。レスの削除、スレッドの非表示と復元 |
++| `admin.py` (`/admin.cgi`) | 管理画面。レスの削除、スレッドの非表示と復元、鍵つきスレッドの鍵の管理 |
++| `jump.py` (`/jump.cgi`) | 署名つき中継ページ。投稿の URL は、まずここを表示して、押したときだけ移動する |
++| `archive.py` | 過去ログ (`o数字.html`) を gzip 圧縮するコマンドラインツール (CGI ではない) |
++| `config.ini` (任意) | 設定ファイル。書式は `config.sample.ini` 参照。実行されない形式で、検査を通った値だけが効く |
++| `run.sh` | トンネルなしでローカル起動するスクリプト (`setup_expose.py --no-tunnel`) |
+ | `style.css`、`header.html`、`hide.js` | 共通の見た目と、板の上部(リンク・注意書き・新規投稿フォーム)。`hide.js` は、ID・トリップの非表示 (ブラウザの中だけで動く) |
+ 
+ ## 2. データファイル
+@@ -25,11 +29,18 @@ Origin/Referer の検証は、コメントアウトで無効になっている
+ | `trip_secret.txt` | トリップ用の秘密鍵。最初の `#` つき投稿のときに自動で作る (権限 600)。GitHub に入れない (`.gitignore`)。無くなると全員のトリップが変わる。ハードリンクが使えない環境 (Google Drive のマウントなど) でも作れる。どうしても保存できないときは、トリップ付きの投稿だけを「トリップ用の鍵を保存できません」で断る (鍵が投稿のたびに変わるのを防ぐ) |
+ | `cap.txt` | キャップの定義。`表示名,パスワードのハッシュ` の1行1件 (`#` で始まる行はコメント)。無くてもよい |
+ | `id_secret.txt` | ID と連続投稿の制限に使う秘密鍵。最初の投稿のときに自動で作る (権限 600)。GitHub に入れない (`.gitignore`)。トリップ用の `trip_secret.txt` とは別の鍵。作り方と、保存できないときの扱いは、`trip_secret.txt` と同じ (保存できないときは、投稿を「ID用の鍵を保存できません」で断る) |
+-| `global.mem` | 新規スレッド作成の連続投稿制限用。IP は保存せず、鍵つきハッシュと時刻を 180 秒だけ保持 |
+-| `admin_fail.mem` | 管理画面のログイン失敗の記録 (IP、回数、時刻) |
++| `global.mem` | 新規スレッド作成の連続投稿制限用。IP は保存せず、鍵つきハッシュと時刻を `GLOBAL_WINDOW` 秒 (初期値 180) だけ保持 |
++| `admin_fail.mem` | 管理画面のログイン失敗の記録 (接続元は IP そのものではなく鍵つきハッシュで保存、回数、時刻) |
++| `config.ini` | 設定 (任意)。`config.sample.ini` をコピーして使う。検査を通らない値は無視され、理由が標準エラーに出る |
++| `key_secret.txt` | 認証キーのハッシュ用の秘密鍵。自動で作る (権限 600)。GitHub に入れない (`.gitignore`) |
++| `jump_secret.txt` | 中継リンクの署名用の秘密鍵。自動で作る (権限 600)。無くなると、投稿済みの中継リンクが全部使えなくなる |
++| `ad.html` | 中継ページに出す広告 (任意)。無ければ何も出ない |
+ | `板/数字.html` | スレッド (数字は作成日時 `yyMMddHHmmss`) |
++| `板/数字.lock` | 鍵つきスレッドの印 (空ファイル)。ある間は、書き込みに認証キーが要る |
++| `板/keys.txt` | その板の認証キー。各行 `ID、ラベル、ハッシュ、範囲、発行時刻、状態` のタブ区切り。キーの本体ではなくハッシュだけを保存する |
+ | `板/x数字.html` | 非表示にしたスレッド |
+ | `板/o数字.html` | 古くなって退避されたスレッド (過去ログ)。`MAX_THREADS` を超えた分が、先頭に `o` を付けて改名される |
++| `板/o数字.html.gz` | `archive.py` で圧縮された過去ログ。URL は `o数字.html` のままで配信される |
+ | `板/kako.txt` | 退避したスレッドの題名の一覧。1行 `o数字.html<>題名`、古い順に追記する。無い (または空の) ときは、今ある `o数字.html` から自動で作り直す |
+ | `板/kako.html` | 過去ログの一覧。`kako.txt` が変わったときに作り直す |
+ | `板/index.html`、`板/index数字.html` | 再生成される板の一覧ページ。`index.html` が1ページ目、`index2.html` 以降が2ページ目以降 (ページごとに別のファイル) |
+@@ -38,13 +49,16 @@ Origin/Referer の検証は、コメントアウトで無効になっている
+ ## 3. サーバー (`setup_expose.py`)
+ 
+ **起動時の準備**
+-- `amezo.py`、`dai.py`、`admin.py` に実行権限を付けます。
++- `amezo.py`、`dai.py`、`admin.py`、`jump.py` に実行権限を付けます。
+ - `blist.txt` の各板のフォルダを作成し、`index.html` が無ければ転送ページを置きます。転送先は `../amezo.cgi?folder=板名` です。
+-- `cloudflared` でトンネルを張り、公開 URL を表示します。
++- 起動前に `flock` が使えるか確かめます (使えないファイルシステムでは、投稿の排他制御が壊れるため)。起動後は、許可リストが効いているかを自分で HTTP で確かめて表示します (自己チェック)。
++- `cloudflared` でトンネルを張り、公開 URL を表示します。`--no-tunnel` を付けると張りません (ローカル用。`run.sh` はこちら)。他に `--port N`、`--make-hash パスワード` (delpass.txt を作って終了)、`--verbose` があります。
+ 
+ **リクエストの振り分け**
+-- `/amezo.cgi`、`/amezo.py`、`/dai.cgi`、`/admin.cgi` などは、CGI として実行します。実行できるのは `ALLOWED_CGI` の3つだけです。環境変数 (`REQUEST_METHOD`、`QUERY_STRING`、`REMOTE_ADDR`、`HTTP_*` など) を渡し、標準入力に POST を渡して、30 秒で打ち切ります。POST は 64KB を超えると 413 を返します。
+-- それ以外は**許可リスト方式の静的配信**です。許可するのは、`/`、`/index.html`、`/style.css`、`/hide.js`、`blist.txt` にある板の `index.html`、`index数字.html`、`数字.html`、過去ログの `o数字.html` と `kako.html` だけです。`delpass.txt` や `x〜.html`、ソースファイルは 404 を返し、ディレクトリの一覧も出しません。
++- `/amezo.cgi`、`/amezo.py`、`/dai.cgi`、`/admin.cgi`、`/jump.cgi` などは、CGI として実行します。実行できるのは `ALLOWED_CGI` の4つだけです。環境変数 (`REQUEST_METHOD`、`QUERY_STRING`、`REMOTE_ADDR`、`HTTP_*` など) を渡し、標準入力に POST を渡して、30 秒で打ち切ります。POST は 64KB を超えると 413 を返します。
++- パスが空、`//` を含む、`%`・バックスラッシュ・NUL・`..`・ドット区間を含む、絶対形式 (`http://…`) のものは、振り分けの前に **400** で断ります。
++- それ以外は**許可リスト方式の静的配信**です。許可するのは、`/`、`/index.html`、`/style.css`、`/hide.js`、`/ad.html`、`blist.txt` にある板の `index.html`、`index数字.html`、`数字.html`、過去ログの `o数字.html` と `kako.html` だけです。`delpass.txt` や `x〜.html`、ソースファイル、`o数字.html.gz` の直接指定は 404 を返し、ディレクトリの一覧も出しません。
++- **圧縮された過去ログ**: `o数字.html.gz` だけが残っている (または平文と更新日時が同じ) ときは、`o数字.html` の URL で gz から配信します。ブラウザが gzip 対応なら圧縮したまま送り (`Content-Encoding: gzip`)、そうでなければサーバー側で伸長して送ります。平文の更新日時が gz と違えば、平文を配信します。
+ 
+ ## 4. 画面の構成
+ 
+@@ -56,18 +70,19 @@ Origin/Referer の検証は、コメントアウトで無効になっている
+ 
+ 1. **受け取り**: 送信が 7500 バイト (`MAX_POST_BYTES`) を超える内容と、`CONTENT_LENGTH` が負の値のものは拒否します。フォームの値は、見えない文字を除去し、HTML エスケープし、本文の改行は `<br>` に変えます。
+ 2. **板の判定**: `folder` が無ければ Referer のパスから取り出します。`blist.txt` に無い板、`/` や `..` を含む名前は拒否します。
+-3. **再読み込み扱い**: 3つの入力欄がすべて空、`name`/`subj`/`comm` が同じ値、または NG ワード (`n`/`c`) に当たった場合は、投稿せず、ページの再生成だけを行います。ページ送り (`?page=N`) の操作は、投稿せずにページを見るだけです。
++3. **再読み込み扱い**: 3つの入力欄がすべて空、`name`/`subj`/`comm` が同じ値、または NG ワード (`n`/`c`) に当たった場合は、投稿せず、ページの再生成だけを行います。ページ送り (`?page=N`) は、実在するページに寄せて (範囲外は最後のページ) 表示します。2ページ目以降を指定したときは投稿しませんが、`page=1` を明示した投稿は受け付けます。
+ 4. **入力の検査**: 改行 20 個まで、題名 45 文字まで、本文 400 文字まで、メール 50 文字まででエラーにし、投稿者名は 25 文字を超えた分を切り捨てます。文字数は、全角・半角・絵文字を区別せず1文字と数え (`&amp;` などのエスケープも1文字、本文の改行も1文字)、題名と名前は空白を除いた文字数です。上限は `amezo.py` の `SUBJ_MAX`、`NAME_MAX`、`MAIL_MAX`、`COMM_MAX` で変えられます。名前の空白は除去し、`ng.txt` の削除ワードを取り除きます (投稿はエスケープされた文で比べるので、`&` や `<` を含むワードも、エスケープして照合します)。管理者名「サポート」を名乗る投稿は、`＃サポート` に変えます (キャップに一致したときを除く)。
+    - **トリップ**: 名前欄の最初の半角 `#` より後ろをパスワードとし、名前の後ろに `◆` と10文字を付けます (全角の `＃` は区切りにしません)。パスワードは名前の文字数に数えず、NG ワードの対象にもせず、保存もしません。パスワードは、空白を除き、全角の英数字・記号を半角にそろえ、100 文字までを使います。計算は `HMAC-SHA256(trip_secret.txt の鍵, パスワード)` の先頭10文字です。同じパスワードなら同じ10文字になりますが、**鍵が変わる (`trip_secret.txt` が無くなる、クローンし直すなど) と、全員のトリップが変わります**。パスワードが空、または空白だけのときは、トリップを付けません。
+    - **偽造防止**: 名前に直接書かれた `◆` は `◇` に、`★` は `☆` に置き換えます。
+     - **ID**: 書き込みごとに `ID:xxxxxxxx` が付きます。同じ回線 (IP) の人は、同じ日・同じ板なら同じ ID になり、日付が変わると変わります。計算は `HMAC(id_secret.txt の鍵, 'id:' + IP + '|' + 日付 + '|' + 板名)` の先頭8文字で、IP そのものは保存しません。IPv6 は上位64bitでまとめます。板が違えば ID も違うので、板をまたいで追跡できません。
+     - **日時**: 投稿日、スレッド番号、ID の日付は、サーバーの時刻に関係なく、**日本時間**です。これを入れる前に書かれた投稿の日付は、そのときのサーバーの時刻のままなので、同じスレッドの中で、表示が混ざります。
+    - **キャップ**: `cap.txt` の表示名と、名前が一致し (空白は無視して比べます)、`#` の後ろのパスワードがそのハッシュに合うとき、`◆` の代わりに `★` を付けます。このときだけ、名前に「サポート」などの管理者名を使えます (管理者名の置き換えをしません)。ハッシュは `python3 amezo.py --make-hash パスワード` で作ります。キャップはトリップの値を使わないので、鍵が変わっても有効です。
+-5. **制限**: 同じ板で 5 秒以内の連投は拒否します (`lasttime.txt`)。新規スレッドは、同じ接続元 (IPv6 は上位64bit) から 180 秒に 1 回だけです (`global.mem`)。
++5. **制限**: 同じ板で 5 秒以内の連投は拒否します (`lasttime.txt`、`POST_INTERVAL`)。新規スレッドは、同じ接続元 (IPv6 は上位64bit) から `GLOBAL_WINDOW` 秒 (初期値 180) に 1 回だけです (`global.mem`)。転送 IP (`CF-Connecting-IP`、`X-Forwarded-For`) は、IP として正しい形のものだけを信用します。
+ 6. **書き込み**:
+-   - 新規スレッドは、`yyMMddHHmmss` のファイルを `O_EXCL` で作ります。重複したら番号を足して、30 回まで試します。
+-   - 返信は、既存ファイルをロックして、最後のレス番号を数え、直前のレスと名前・本文が同じなら「二重カキコ」で拒否します。
+-   - 本文の URL はリンクにし、メールアドレスがあれば名前を `mailto:` リンクにします。
++   - 新規スレッドは、`yyMMddHHmmss` のファイルを `O_EXCL` で作ります。重複したら番号を足して、30 回まで試します。過去ログ (平文・`.gz` のどちらか) として残っている番号は使いません。
++   - 返信は、既存ファイルをロックして、最後のレス番号を数え、直前のレスと名前・本文が同じなら「二重カキコ」で拒否します。ロックを待つ間に過去ログ圧縮でファイルの名前が消されていた (`nlink = 0`) ときは、書かずに「過去ログになったため返信できません」と表示します。
++   - **鍵つきスレッド**: `数字.lock` があるスレッドへの返信は、ロックの中で認証キーを照合します。キーが無い・合わないときは、理由を区別せずエラーにします。鍵のないスレッドでは、フォームの `key` は無視します。
++   - 本文の URL はリンクにします (メールアドレスがあれば名前を `mailto:` リンクに)。URL のリンク先は、既定では**署名つきの中継ページ** (`jump.cgi`) です。URL の検証を通らないものはリンクにしません。`config.ini` の `JUMP_ENABLED = false` で直リンクに戻ります。
+ 7. **再生成と転送**: 板の `index.html` を作り直し、`../板/index.html` に 303 で転送します。右フレームの中で、新しいページが表示されます。
+ 
+ ## 6. スレッドファイルの形式
+@@ -84,28 +99,42 @@ Origin/Referer の検証は、コメントアウトで無効になっている
+ - `regen.lock` で排他制御をします。投稿のときは最大 10 秒待ち、再読み込みのときは、取れなければ作り直しを諦めます。
+ - 一時ファイルに書き出してから `os.replace` で入れ替えるので、閲覧中に壊れたページが見えることはありません。
+ - スレッドは、**更新日時の新しい順**に並びます。返信されたスレッドは、先頭に来ます。
+-- **過去ログ**: `MAX_THREADS` (初期値 200) を超えた古いスレッドは、`数字.html` を `o数字.html` に改名して退避します (0 なら退避しません)。退避が起きると、そのスレッドの題名を `kako.txt` に追記し、一覧 `kako.html` を作り直して、板のページに「過去ログ」へのリンクを出します。退避済みのファイルを毎回開かないので、退避済みが増えても、投稿が遅くなりにくくなっています。過去ログへの返信は受け付けず、「過去ログになったため返信できません」と表示します。復元するには、サーバー上で `o` を外して改名し、`kako.txt` の該当の行を消すか、`kako.txt` ごと消します (消すと、次の再生成で作り直します)。
+-- **ページ送り**: 板のページの上下に「← 前の20件　1 2 3　次の20件 →」が出ます。2ページ目以降は、このリンク (`amezo.cgi?folder=板&page=N`) が押されたときだけ、そのページのファイル `index数字.html` を、読むだけで作って案内します (ロックも、退避もしません)。ページごとに別のファイルなので、同時に違うページが頼まれても取り違えず、ページ番号が範囲外なら最後のページにするので、ファイルはページ数より増えません。作ったファイルは `PAGE_CACHE` 秒 (10秒) 使い回します。古い形式のフォーム (`next` = 開始位置) も、ページ番号に直して受け付けます。
++- **過去ログ**: `MAX_THREADS` (初期値 200) を超えた古いスレッドは、`数字.html` を `o数字.html` に改名して退避します (0 なら退避しません)。退避したスレッドの鍵の印 (`.lock`) は消します。退避が起きると、そのスレッドの題名を `kako.txt` に追記し、一覧 `kako.html` を作り直して、板のページに「過去ログ」へのリンクを出します。`kako.txt` の作り直しは、`.gz` だけになった過去ログの題名も読めます。退避済みのファイルを毎回開かないので、退避済みが増えても、投稿が遅くなりにくくなっています。過去ログへの返信は受け付けず、「過去ログになったため返信できません」と表示します。復元するには、サーバー上で `o` を外して改名し、`kako.txt` の該当の行を消すか、`kako.txt` ごと消します (消すと、次の再生成で作り直します)。
++- **過去ログの圧縮 (`archive.py`)**: `python3 archive.py 板名` または `--all` で、退避済みの `o数字.html` を2段階で圧縮します。1回目の実行では `o数字.html.gz` を作って平文を残し、次回以降の実行で、中身が一致することを確かめてから平文を消します (どちらも、最後の書き込みから `ARCHIVE_QUIET_SECONDS` 秒 (初期値 600、`--quiet=N` で変更可) は触りません)。壊れた gz は消さずに `.gz.bad` に退避します。`--restore 板 o数字` で平文に戻せます。`--selftest` で環境を、`--dry-run` で対象を確認できます。
++- **ページ送り**: 板のページの上下に「← 前の20件　1 2 [3]　次の20件 →」が出ます。ページが10以下なら全部の番号、11以上なら 1・最後・現在の前後2つだけを出し、間は `…` にします。2ページ目以降は、このリンク (`amezo.cgi?folder=板&page=N`) が押されたときだけ、そのページのファイル `index数字.html` を、読むだけで作って案内します (ロックも、退避もしません)。ページごとに別のファイルなので、同時に違うページが頼まれても取り違えず、ページ番号が範囲外なら最後のページにするので、ファイルはページ数より増えません。作ったファイルは `PAGE_CACHE` 秒 (10秒) 使い回します。古いページのファイルは、600 秒より古いものを1ページ目の再生成のときに掃除します。古い形式のフォーム (`next` = 開始位置) も、ページ番号に直して受け付けます (GET でも POST でも)。
+ - **大きなスレッドの読み方**: 256KB を超えるスレッドは、全部読まず、先頭行と最後の7レスだけを読みます。レスの数は、ファイル全体の改行を数えて求めます (少しずつ読むので、メモリは増えません)。改行が `\n` 以外、`<form` の行が1つでない、などで形が想定と違うときは、従来どおり全部読みます。
+ 
+ ## 8. 管理画面 (`admin.py`)
+ 
+-- **認証**: 各画面のフォームにパスワードを持たせ、送信のたびに `delpass.txt` のハッシュと照合します。同じ IP から 5 回失敗すると、15 分間は照合せずに拒否します。クッキーやセッションは使いません。
++- **認証**: 各画面のフォームにパスワードを持たせ、送信のたびに `delpass.txt` のハッシュと照合します。同じ接続元から 5 回失敗すると、15 分間は照合せずに拒否します (接続元は鍵つきハッシュで記録し、IP そのものは残しません)。クッキーやセッションは使いません。
+ - **画面**: 板の一覧、スレッドの一覧 (表示中と非表示中)、レスの一覧 (チェックボックス) の順にたどります。
+ - **操作**:
+   - レスの削除: 選んだレスの行を削除します。**1 番は削除できません**。スレッドの更新日時は、残った最後のレスの日時に戻します。
+   - 非表示: `数字.html` を `x数字.html` に改名します。復元はその逆です。
++  - 鍵の管理: スレッドごとに鍵をかける/外す、認証キーの発行と失効ができます。発行したキーは、その画面で**1回だけ**表示されます (サーバーにはハッシュしか残りません)。キーの範囲は「そのスレッドだけ」か「その板の鍵つきスレッドどれでも」です。鍵つきでも、読むのは誰でもできます。
+ - 操作のあとは、板の `index.html` を再生成します。画面には、`Cache-Control: no-store` と noindex を付けています。
+ 
+ ## 9. 現在の安全対策と注意点
+ 
+-- **入っているもの**: 静的配信の許可リスト、入力の HTML エスケープ、板名の検証、スレッド作成の `O_EXCL`、`flock` による排他制御、POST のサイズ上限、パスワードのハッシュ化と失敗回数の制限。
++- **入っているもの**: 静的配信の許可リストと、不正なパスの 400 拒否、入力の HTML エスケープ、板名の検証、スレッド作成の `O_EXCL`、`flock` による排他制御、POST のサイズ上限、パスワードのハッシュ化と失敗回数の制限 (失敗の記録は鍵つきハッシュ)、中継リンクの署名 (改ざんするとリンクにならない)、認証キーはハッシュだけ保存、`config.ini` は実行されない形式で検査してから使う。
++- **中継ページ (`jump.py`)**: 署名が合わないときは、クリックできるリンクを出しません (URL が正しい形なら、文字としてだけ表示)。署名が合うときも自動では移動せず、ホスト名を大きく出して、「進む」を押したときだけ移動します。`xn--` を含むホストには注意文を出します。広告 (`ad.html`) は、同一生成元の許可なしの iframe で出します。
+ - **入っていないもの**: Origin/Referer の検証 (一時的に無効)。他のサイトのフォームから、投稿を送らせることが可能です。管理画面の操作は、パスワードがフォームに入っているので影響しません。
+ - **IP の判定**: `amezo.py` の `client_ip()` は、接続元が `127.0.0.1` のときだけ、`CF-Connecting-IP` や `X-Forwarded-For` を信用します。プロキシ経由で全員が同じ IP に見えると、IP 制限が、全員に一斉に効くことがあります。
+ - **ID・トリップの非表示 (`hide.js`)**: 書き込みの横に `[IDを非表示]` `[トリップ非表示]` が出ます。押すと、同じ ID (またはトリップ) の書き込みの本文が隠れて「あぼーん」と出ます。非表示の一覧は、ブラウザの `localStorage` (`bbs_hide`) にだけ保存します (サーバーには何も送りません。ID は日替わりなので、3日で捨てます)。書き込みの `data-id` と `data-trip` を使い、`style.css` の `.abone` などで隠します。`<script>` は、新しいスレッドと板のページにだけ入るので、すでにあるスレッドには、ボタンが出ません。
+ 
+ ## 10. 使い始める手順
+ 
+-1. `blist.txt`、`header.html`、`style.css`、`index.html`、`dai.py`、`amezo.py`、`admin.py`、`setup_expose.py` を置きます。
+-2. 管理用パスワードを作り、`delpass.txt` に保存します。
+-3. `setup_expose.py` を起動し、表示された URL の `/` を開きます。
++1. `blist.txt`、`header.html`、`style.css`、`index.html`、`dai.py`、`amezo.py`、`admin.py`、`jump.py`、`archive.py`、`setup_expose.py` を置きます。
++2. 管理用パスワードを作り、`delpass.txt` に保存します (`python3 setup_expose.py --make-hash パスワード` でも作れます)。
++3. 設定を変えたいときは、`config.sample.ini` を `config.ini` にコピーして編集します (無くても動きます)。
++4. `setup_expose.py` を起動し、表示された URL の `/` を開きます。トンネルなしのローカル確認は `./run.sh` です。
++
++## 11. テスト
++
++`tests/` にあります。どれも一時フォルダで動くので、元のフォルダは汚しません。
++
++- `python3 tests/unit_test.py`: 設定の検査、中継リンク、認証キー、ページ送りなどの関数レベル
++- `python3 tests/config_test.py`: `config.ini` が設定値に効くこと
++- `python3 tests/archive_test.py`: 過去ログ圧縮の段階1/2、restore、壊れた gz の扱い
++- `python3 tests/port_test.py`: サーバーを立てて、投稿・中継・鍵つき・管理・gz 配信を通しで確認
++- `node tests/hide_test.js`: `hide.js` のテスト (jsdom が必要)
+diff --git a/admin.py b/admin.py
+index edd8aa9..124f784 100644
+--- a/admin.py
++++ b/admin.py
+@@ -12,6 +12,8 @@ import os
+ import re
+ import time
+ import fcntl
++import hashlib
++import hmac
+ import html
+ import urllib.parse
+ from datetime import datetime
+@@ -35,6 +37,8 @@ td.body { max-width: 32em; word-break: break-all; }
+ form.inline { display: inline; }
+ .msg { padding: 6px 10px; border: 1px solid #c33; margin: 8px 0; }
+ .msg.ok { border-color: #393; }
++.keybox { border: 2px solid #c60; padding: 10px 14px; margin: 10px 0; background: #fff8e8; }
++.keybox code { font-size: 1.3em; letter-spacing: 0.05em; user-select: all; }
+ button { padding: 4px 12px; }
+ </style>"""
+ 
+@@ -106,7 +110,7 @@ def login_page(message=''):
+ 
+ def fail_store(update):
+     """admin_fail.mem を排他ロックして update(fails, now) を実行し、書き戻す。
+-    fails: {ip: (失敗回数, 最終失敗時刻)}。ファイルを開けなければ None (呼び出し側は拒否する)"""
++    fails: {接続元の鍵つきハッシュ: (失敗回数, 最終失敗時刻)}。ファイルを開けなければ None (呼び出し側は拒否する)"""
+     try:
+         fd = os.open(FAIL_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+     except OSError:
+@@ -129,8 +133,10 @@ def fail_store(update):
+ 
+ def authenticate(pw):
+     ip = amezo.client_ip() or 'unknown'
++    # IP は保存せず、鍵つきハッシュで数える (IPv6 は上位64bitでまとめる)
++    who = hmac.new(amezo.id_key(), ('adm:' + amezo.ip_unit(ip)).encode(), hashlib.sha256).hexdigest()[:24]
+ 
+-    blocked = fail_store(lambda fails, now: fails.get(ip, (0, 0))[0] >= MAX_FAILS)
++    blocked = fail_store(lambda fails, now: fails.get(who, (0, 0))[0] >= MAX_FAILS)
+     if blocked is None:
+         page('管理画面', msg_html('状態ファイル (admin_fail.mem) を開けないため、受け付けられません。', ok=False))
+     if blocked:
+@@ -144,9 +150,9 @@ def authenticate(pw):
+ 
+     def record(fails, now):
+         if ok:
+-            fails.pop(ip, None)
++            fails.pop(who, None)
+         else:
+-            fails[ip] = (fails.get(ip, (0, 0))[0] + 1, now)
++            fails[who] = (fails.get(who, (0, 0))[0] + 1, now)
+ 
+     fail_store(record)
+     return ok
+@@ -269,13 +275,15 @@ def show_threads(pw, folder, message='', ok=True):
+     for mt, res, path in active[:LIST_LIMIT]:
+         title, count = thread_summary(path)
+         rows += (f'<tr><td>{E(title) or "(題名なし)"}</td><td>{count}</td><td>{fmt_time(mt)}</td><td>'
++                 + ('🔒' if amezo.thread_is_locked(folder, res) else '') + '</td><td>'
+                  + btn(pw, 'レスを見る', act='replies', folder=folder, res=res) + ' '
++                 + btn(pw, '鍵の管理', act='keys', folder=folder, res=res) + ' '
+                  + btn(pw, '非表示', confirm='このスレッドを非表示にします。よろしいですか?',
+                        act='hide', folder=folder, res=res)
+                  + '</td></tr>')
+     body = msg_html(message, ok) + nav(pw)
+     if rows:
+-        body += '<table><tr><th>題名</th><th>レス数</th><th>更新</th><th></th></tr>' + rows + '</table>'
++        body += '<table><tr><th>題名</th><th>レス数</th><th>更新</th><th>鍵</th><th></th></tr>' + rows + '</table>'
+         if len(active) > LIST_LIMIT:
+             body += f'<p>新しい順に {LIST_LIMIT} 件だけ表示しています (全 {len(active)} 件)。</p>'
+     else:
+@@ -320,8 +328,71 @@ def show_replies(pw, folder, res, message='', ok=True):
+     page(f'{title or "(題名なし)"} ({folder}/{res})', body)
+ 
+ 
++def show_keys(pw, folder, res, message='', ok=True, issued=None):
++    """鍵の管理: 鍵のかけ外し、キーの発行・失効。発行したキーは、この画面に1度だけ出す"""
++    path = f'./{folder}/{res}.html'
++    if not os.path.exists(path):
++        fatal(pw, 'スレッドがありません。')
++    title, _count = thread_summary(path)
++    locked = amezo.thread_is_locked(folder, res)
++
++    body = msg_html(message, ok) + nav(pw, folder)
++    if issued is not None:
++        body += ('<div class="keybox"><b>キーを発行しました。この画面を閉じると、二度と表示されません。</b>'
++                 '<br>いまのうちに控えて、書き込んでよい人に渡してください。<br><br>'
++                 f'<code>{E(issued)}</code></div>')
++    body += ('<p>状態: <b>' + ('🔒 鍵つき (認証キーがないと書き込めません)' if locked
++                               else '鍵なし (誰でも書き込めます)') + '</b></p><p>')
++    if locked:
++        body += (btn(pw, '鍵を外す', confirm='このスレッドの鍵を外して、誰でも書き込めるようにします。よろしいですか?',
++                     act='unlock', folder=folder, res=res) + ' '
++                 + btn(pw, '書き込みフォームを作り直す', act='lock', folder=folder, res=res))
++    else:
++        body += btn(pw, '鍵をかける', confirm='このスレッドに鍵をかけます。キーを持たない人は書き込めなくなります。よろしいですか?',
++                    act='lock', folder=folder, res=res)
++    body += '</p><p>※ 鍵つきでも、読むのは誰でもできます。</p>'
++
++    rows = ''
++    for r in amezo.keys_load(folder):
++        if r['scope'] != '*' and r['scope'] != res:
++            continue        # このスレッドで使えるキーだけ
++        active = r['status'] == 'active'
++        rows += (f'<tr><td>{E(r["id"])}</td><td>{E(r["label"])}</td><td>'
++                 + ('この板の鍵つきスレッドどれでも' if r['scope'] == '*' else 'このスレッドだけ')
++                 + f'</td><td>{fmt_time(r["created"])}</td><td>' + ('有効' if active else '失効') + '</td><td>'
++                 + (btn(pw, '失効', confirm=('このキーは、この板の鍵つきスレッド全部で使えなくなります。よろしいですか?'
++                                             if r['scope'] == '*' else 'このキーを失効します。よろしいですか?'),
++                        act='revoke', id=r['id'], folder=folder, res=res) if active else '')
++                 + '</td></tr>')
++    body += '<h3>キー</h3>'
++    if rows:
++        body += ('<table><tr><th>ID</th><th>ラベル</th><th>範囲</th><th>発行日時</th><th>状態</th><th></th></tr>'
++                 + rows + '</table>')
++    else:
++        body += '<p>このスレッドで使えるキーはまだありません。</p>'
++    body += ('<h3>キーを発行する</h3>'
++             f'<form method="post" action="admin.cgi">{hidden(pw, act="issue", folder=folder, res=res)}'
++             'ラベル (誰に渡すか。40文字まで) <input type="text" name="label" size="24"><br>'
++             '範囲 <label><input type="radio" name="scope" value="thread" checked> このスレッドだけ</label> '
++             '<label><input type="radio" name="scope" value="board"> この板の鍵つきスレッドどれでも</label><br>'
++             '<button type="submit">発行</button></form>'
++             '<p>鍵をかける前にキーを発行しても、あとから発行してもかまいません。'
++             'キーは発行したときに1度だけ表示されます (サーバーにはハッシュしか残りません)。</p>')
++    page(f'鍵の管理: {title or "(題名なし)"} ({folder}/{res})', body)
++
++
+ # ---- 操作 ------------------------------------------------------------------
+ 
++def do_set_lock(folder, res, on):
++    if not os.path.exists(f'./{folder}/{res}.html'):
++        return False, 'スレッドがありません。'
++    if not amezo.thread_set_lock(folder, res, on):
++        return False, '鍵の印のファイルを更新できませんでした。'
++    if on:
++        return True, f'スレッド {res} に鍵をかけました。'
++    return True, f'スレッド {res} の鍵を外しました。'
++
++
+ def do_delete(folder, res, nums):
+     path = f'./{folder}/{res}.html'
+     nums = {n for n in nums if n != 1}
+@@ -445,6 +516,27 @@ def main():
+ 
+     if act == 'replies':
+         show_replies(pw, folder, res)
++    elif act == 'keys':
++        show_keys(pw, folder, res)
++    elif act in ('lock', 'unlock'):
++        ok, message = do_set_lock(folder, res, act == 'lock')
++        if ok:
++            message += regen(folder)
++        show_keys(pw, folder, res, message, ok)
++    elif act == 'issue':
++        scope = '*' if get('scope') == 'board' else res
++        result = amezo.key_issue(folder, get('label'), scope)
++        if not result or not result[1]:
++            show_keys(pw, folder, res, 'キーを保存できませんでした。', False)
++        _key_id, issued = result
++        show_keys(pw, folder, res, regen(folder), True, issued)
++    elif act == 'revoke':
++        key_id = get('id')
++        ok = bool(re.fullmatch(r'[A-Z2-7]{4}', key_id)) and bool(amezo.key_revoke(folder, key_id))
++        message = f'キー {key_id} を失効しました。' if ok else 'キーを失効できませんでした。'
++        if ok:
++            message += regen(folder)
++        show_keys(pw, folder, res, message, ok)
+     elif act == 'delete':
+         nums = [int(x) for x in params.get('del', []) if re.fullmatch(r'[0-9]{1,6}', x)]
+         ok, message = do_delete(folder, res, nums)
+diff --git a/amezo.py b/amezo.py
+index aedffdf..9526951 100644
+--- a/amezo.py
++++ b/amezo.py
+@@ -14,6 +14,8 @@ import html
+ import hashlib
+ import base64
+ import socket
++import ipaddress
++import gzip as gzip_module
+ from datetime import datetime, timedelta, timezone
+ 
+ # スクリプトのあるディレクトリに固定
+@@ -43,7 +45,10 @@ URLBASE = 'http://ame.x0.com/'
+ ADMIN = 'サポート'
+ 
+ POST_INTERVAL = 5
++GLOBAL_WINDOW = 180        # 同じ IP の新規スレッド作成の間隔 (秒)。0 なら実質無制限 (config.ini で変更可)
+ MAX_THREADS = 200          # この数を超えた古いスレッドは o数字.html に退避 (0 なら退避しない)
++JUMP_ENABLED = True        # 投稿の URL を、署名つきの中継ページ (jump.cgi) 経由のリンクにする
++ARCHIVE_QUIET_SECONDS = 600  # 過去ログの圧縮 (archive.py): 最後の書き込みからこの秒数は触らない
+ KAKO_FILE = 'kako.html'    # 退避したスレッド(過去ログ)の一覧ページ
+ KAKO_LIST = 'kako.txt'     # 退避したスレッドの題名の一覧。1行: o数字.html<>題名 (古い順に追記)
+ KAKO_SEP = '<>'            # 題名は < と > をエスケープ済みなので、<> は題名に現れない
+@@ -88,6 +93,165 @@ TRIP_MARK = '◆'            # トリップの印 (名前に直接書かれた
+ CAP_MARK = '★'             # キャップの印 (名前に直接書かれたら ☆ に置き換える)
+ CAP_FILE = 'cap.txt'       # 1行: 表示名,パスワードのハッシュ (amezo.py --make-hash で作る)
+ 
++# ---- 認証キー (鍵つきスレッド) -------------------------------------------------
++KEY_SECRET_FILE = 'key_secret.txt'   # キーのハッシュ用の秘密鍵 (トリップ/ID とは別)
++KEY_CTX = 'key:'           # 公開後に変えない
++KEYS_FILE = 'keys.txt'     # 板ごと: <板>/keys.txt
++KEY_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
++
++# ---- 中継ページ (jump.py): 投稿の URL への署名つきリンク -------------------------
++JUMP_SECRET_FILE = 'jump_secret.txt' # 署名用の秘密鍵 (他の鍵とは別)。失うと、投稿済みの中継リンクが全部使えなくなる
++JUMP_CTX = 'jump:'         # 公開後に変えない
++JUMP_SIG_LEN = 22          # 署名の長さ (base64url で22文字 = 132bit)
++URL_MAX_LEN = 2000
++
++# ---- 設定ファイル (config.ini) -------------------------------------------------
++# config.ini は実行されない形式。キー・型・範囲・文字種を検査して、外れた値は無視する (理由は標準エラーに出る)。
++# 値の中の ${…} や定数名は展開しない (そのままの文字列として検査する)。
++# 古い config.php のような「読み込むと実行される設定」は無い (あれば警告だけ出す)。
++
++def config_schema():
++    """名前 => (型, 既定値, 最小, 最大)。最小・最大は、int なら値、text なら文字数、ips なら個数"""
++    return {
++        'AMEZO': ('text', '＠あめぞう', 0, 40),
++        'URLBASE': ('url', 'http://ame.x0.com/', 0, 200),
++        'ADMIN': ('text', 'サポート', 1, 20),
++        'POST_INTERVAL': ('int', 5, 0, 3600),
++        'GLOBAL_WINDOW': ('int', 180, 0, 86400),
++        'MAX_THREADS': ('int', 200, 0, 100000),
++        'PAGE_CACHE': ('int', 10, 0, 3600),
++        'MAX_POST_BYTES': ('int', 7500, 1000, 1000000),
++        'SUBJ_MAX': ('int', 45, 1, 500),
++        'NAME_MAX': ('int', 25, 1, 200),
++        'MAIL_MAX': ('int', 50, 1, 500),
++        'COMM_MAX': ('int', 400, 1, 10000),
++        'COMM_LINES_MAX': ('int', 20, 1, 1000),
++        'HASH_ITERATIONS': ('int', 100000, 1000, 5000000),
++        'TRUSTED_PROXIES': ('ips', ['127.0.0.1', '::1'], 0, 16),
++        'JUMP_ENABLED': ('bool', True, 0, 1),
++        'ARCHIVE_QUIET_SECONDS': ('int', 600, 0, 604800),
++    }
++
++
++def config_check(type_, v, min_, max_):
++    """1つの値を検査する。通れば (True, 型を直した値)、外れれば (False, 理由)"""
++    if type_ == 'int':
++        if not isinstance(v, str) or not re.fullmatch(r'-?\d{1,12}', v.strip()):
++            return False, '整数ではありません'
++        n = int(v.strip())
++        return (True, n) if min_ <= n <= max_ else (False, f'{min_}〜{max_} の範囲外です')
++    if type_ == 'bool':
++        l = v.strip().lower() if isinstance(v, str) else ''
++        if l in ('1', 'true', 'yes', 'on'):
++            return True, True
++        if l in ('0', 'false', 'no', 'off'):
++            return True, False
++        return False, 'true / false ではありません'
++    if type_ == 'text':   # 画面にそのまま出す文字列。HTML や展開に使われうる文字は入れさせない
++        if not isinstance(v, str):
++            return False, '文字列ではありません'
++        if re.search(r'[\x00-\x1f\x7f<>"\'&$\\]', v):
++            return False, '使えない文字 (制御文字 < > " \' & $ \\) を含みます'
++        return (True, v) if min_ <= len(v) <= max_ else (False, f'{min_}〜{max_} 文字ではありません')
++    if type_ == 'url':
++        if not isinstance(v, str) or len(v.encode('utf-8')) > max_ or \
++                (v != '' and not re.fullmatch(r'https?://[A-Za-z0-9][A-Za-z0-9.\-:/_]*', v)):
++            return False, 'http:// か https:// で始まる URL ではありません'
++        return True, v
++    if type_ == 'ips':
++        if v == '':
++            return True, []                       # 「TRUSTED_PROXIES =」 は、どのプロキシも信用しない
++        if not isinstance(v, list) or len(v) > max_:
++            return False, 'IP アドレスの並びではありません'
++        out = []
++        for ip in v:
++            if not isinstance(ip, str):
++                return False, 'IP アドレスではない値があります'
++            try:
++                ipaddress.ip_address(ip.strip())
++            except ValueError:
++                return False, 'IP アドレスではない値があります'
++            out.append(ip.strip())
++        return True, out
++    return False, '未対応の型です'
++
++
++def _parse_ini_raw(text):
++    """INI の生の値を読む (展開はしない)。書き方の誤りがあれば None。
++    戻り値: {キー: 文字列 or [文字列]}。同じキーが複数あれば最後の値 (KEY[] は積む)。"""
++    raw = {}
++    for line in text.splitlines():
++        s = line.strip()
++        if s == '' or s.startswith(';') or s.startswith('#'):
++            continue
++        if s.startswith('[') or '=' not in s:
++            return None
++        k, _, v = s.partition('=')
++        k = k.strip()
++        v = v.strip()
++        if k == '':
++            return None
++        is_list = k.endswith('[]')
++        if is_list:
++            k = k[:-2].strip()
++        if v.startswith('"'):
++            end = v.find('"', 1)
++            if end > 0:
++                v = v[1:end]
++        else:
++            v = re.split(r'[ \t];', v, maxsplit=1)[0].strip()
++        if is_list:
++            prev = raw.get(k)
++            if isinstance(prev, list):
++                prev.append(v)
++            elif prev is None:
++                raw[k] = [v]
++            else:
++                raw[k] = [prev, v]
++        else:
++            raw[k] = v
++    return raw
++
++
++def config_load(file):
++    """config.ini を読み、検査を通った値だけを返す。戻り値: (値の dict, 無視した理由の list)"""
++    if not os.path.isfile(file):
++        return {}, []
++    try:
++        with open(file, 'r', encoding='utf-8') as f:
++            text = f.read()
++    except (OSError, UnicodeDecodeError):
++        return {}, ['読み込めません (書き方の誤り)']
++    raw = _parse_ini_raw(text)
++    if raw is None:
++        return {}, ['読み込めません (書き方の誤り)']
++    schema = config_schema()
++    out = {}
++    errors = []
++    for k, v in raw.items():
++        if k not in schema:
++            errors.append(f'不明なキー: {k}')
++            continue
++        type_, _default, min_, max_ = schema[k]
++        ok, val = config_check(type_, v, min_, max_)
++        if ok:
++            out[k] = val
++        else:
++            errors.append(f'{k}: {val}')
++    return out, errors
++
++
++_cfg_values, _cfg_errors = config_load(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.ini'))
++for _e in _cfg_errors:
++    print(f'amezo: config.ini の {_e} (無視して、既定値を使います)', file=sys.stderr)
++if os.path.isfile(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.php')):
++    print('amezo: config.php は読み込みません (実行される形式の設定は使いません)。config.ini に移してください', file=sys.stderr)
++for _k, _v in _cfg_values.items():
++    globals()[_k] = _v
++for _tmp_name in ('_cfg_values', '_cfg_errors', '_e', '_k', '_v'):
++    globals().pop(_tmp_name, None)
++del _tmp_name
++
+ HEADER = "Content-type: text/html; charset=UTF-8\r\n\r\n"
+ 
+ _ENTITY_TOKEN = re.compile(r'&(?:amp|quot|lt|gt|#39);|[\s\S]')
+@@ -147,16 +311,23 @@ def url_decode(s):
+     return to_utf8(urllib.parse.unquote_to_bytes(s.replace(b'+', b' ')))
+ 
+ 
++def _is_ip(s):
++    try:
++        ipaddress.ip_address(s)
++        return True
++    except ValueError:
++        return False
++
++
+ def client_ip():
+     addr = os.environ.get('REMOTE_ADDR', '')
+     if addr not in TRUSTED_PROXIES:
+         return addr
+-    ip_re = re.compile(r'^[0-9A-Fa-f:.]{2,45}$')
+     cf = os.environ.get('HTTP_CF_CONNECTING_IP', '')
+-    if cf and ip_re.match(cf):
++    if cf and _is_ip(cf):
+         return cf
+     xff = [p.strip() for p in os.environ.get('HTTP_X_FORWARDED_FOR', '').split(',')]
+-    if xff and ip_re.match(xff[-1]):
++    if xff and _is_ip(xff[-1]):
+         return xff[-1]
+     return addr
+ 
+@@ -353,7 +524,7 @@ def touch_lasttime(folder):
+ 
+ 
+ def check_global_ip(ip):
+-    """同じ接続元の新規スレッドを 180 秒止める。IP は保存せず、鍵つきハッシュで覚える。"""
++    """同じ接続元の新規スレッドを GLOBAL_WINDOW 秒止める。IP は保存せず、鍵つきハッシュで覚える。"""
+     who = hmac.new(id_key(), (RL_CTX + ip_unit(ip)).encode('utf-8'), hashlib.sha256).hexdigest()[:24]
+     try:
+         fd = os.open('global.mem', os.O_RDWR | os.O_CREAT, 0o600)
+@@ -365,10 +536,10 @@ def check_global_ip(ip):
+         iplist = {}
+         for line in f:
+             parts = line.split()
+-            if len(parts) == 2 and parts[1].isdigit() and now - int(parts[1]) < 180:
++            if len(parts) == 2 and parts[1].isdigit() and now - int(parts[1]) < GLOBAL_WINDOW:
+                 iplist[parts[0]] = int(parts[1])
+         if who in iplist:
+-            remain = 180 - (now - iplist[who])
++            remain = GLOBAL_WINDOW - (now - iplist[who])
+             error(f"あと {remain} 秒たってから投稿してください")
+         iplist[who] = now
+         f.seek(0)
+@@ -377,9 +548,23 @@ def check_global_ip(ip):
+             f.write(f"{k} {v}\n")
+ 
+ 
++def archived_path(folder, name):
++    """過去ログ (退避済みのスレッド) の実体のパス。name は 'o数字.html'。
++    平文があれば平文、無ければ .gz。どちらも無ければ None"""
++    p = f'./{folder}/{name}'
++    if os.path.isfile(p):
++        return p
++    return p + '.gz' if os.path.isfile(p + '.gz') else None
++
++
++def archived_exists(folder, res):
++    """この番号のスレッドが、過去ログとして (平文でも .gz でも) 残っているか"""
++    return bool(re.fullmatch(r'\d+', res)) and archived_path(folder, f'o{res}.html') is not None
++
++
+ def thread_missing(folder, res, verb):
+     """スレッドが見つからないとき。過去ログに退避済みなら、その旨を知らせる"""
+-    if re.match(r'^\d+$', res) and os.path.exists(f'./{folder}/o{res}.html'):
++    if archived_exists(folder, res):
+         error(f'このスレッドは過去ログになったため{verb}できません.')
+     error('スレッドがありません.')
+ 
+@@ -396,25 +581,285 @@ def redirect(folder, index_name):
+     sys.exit(0)
+ 
+ 
+-def url_link(m):
+-    url = dsp = m.group(1)
+-    url = url.replace('&amp;', '&')
+-    return f'<a href="{url}" target="_blank" rel="noopener noreferrer nofollow">{dsp}</a>'
++def b64url_encode(b):
++    return base64.urlsafe_b64encode(b).decode('ascii').rstrip('=')
++
++
++def b64url_decode(s):
++    """base64url を bytes に戻す。文字種が違う・形が壊れていれば None"""
++    if not s or not re.fullmatch(r'[A-Za-z0-9_-]+', s):
++        return None
++    try:
++        return base64.urlsafe_b64decode(s + '=' * (-len(s) % 4))
++    except ValueError:
++        return None
++
++
++def url_is_valid(url):
++    """中継ページに渡してよい URL か (http/https、ホスト名は英数字か [ で始まる、使える文字は ASCII の URL 文字だけ)"""
++    if not url or len(url.encode('utf-8')) > URL_MAX_LEN:
++        return False
++    return bool(re.fullmatch(r"https?://[A-Za-z0-9\[][A-Za-z0-9\-._~:/?#\[\]@!$*+,;=%()'&]*", url))
++
++
++def jump_secret_key():
++    key = load_secret(JUMP_SECRET_FILE)
++    if not key:
++        error('中継用の鍵を保存できません.')
++    return key
++
++
++def jump_sign(url):
++    """URL の署名: HMAC-SHA256(中継用の秘密鍵, 'jump:' + URL) の先頭132bit"""
++    digest = hmac.new(jump_secret_key(), (JUMP_CTX + url).encode('utf-8'), hashlib.sha256).digest()
++    return b64url_encode(digest)[:JUMP_SIG_LEN]
++
++
++def jump_verify(url, sig):
++    return url_is_valid(url) and hmac.compare_digest(jump_sign(url), sig)
++
+ 
++def jump_href(url):
++    """スレッド HTML に書く中継リンクの href (属性用にエスケープ済み。板のフォルダの中から見た相対パス)"""
++    return '../jump.cgi?u=' + b64url_encode(url.encode('utf-8')) + '&amp;s=' + jump_sign(url)
+ 
+-def reply_form(res, links=''):
+-    """レス用フォーム(1行で返す。スレッドファイルのパーサが行単位のため)"""
++
++def linkify_urls(escaped, jump=None):
++    """エスケープ済みの本文から URL を探して、リンクにする。
++    - URL に使える ASCII の文字と、エスケープされた &amp; &#39; だけを URL とみなす
++      (直後の日本語、&gt; &quot; などのエスケープ、<br> は URL に含めない)
++    - 末尾の . , ; : ! ? ( と、対応のない ) ] は URL に含めない
++    - http:// か https:// で始まり、ホスト名の最初が英数字 (または [ ) のものだけ
++    jump (既定は JUMP_ENABLED) が True なら、リンク先は署名つきの中継ページ。表示する文字は元の URL のまま。
++    False なら直リンク。href はエスケープを戻してから属性用に正しくエスケープし直す (生の & を入れない)。"""
++    if jump is None:
++        jump = JUMP_ENABLED
++
++    def repl(m):
++        dsp = m.group(0)
++        tail = ''
++        while dsp:
++            if dsp.endswith('&amp;') or dsp.endswith('&#39;'):
++                cut = 5
++            else:
++                c = dsp[-1]
++                if c in '.,;:!?(':
++                    cut = 1
++                elif c == ')' and dsp.count(')') > dsp.count('('):
++                    cut = 1
++                elif c == ']' and dsp.count(']') > dsp.count('['):
++                    cut = 1
++                else:
++                    break
++            tail = dsp[-cut:] + tail
++            dsp = dsp[:-cut]
++        url = dsp.replace('&amp;', '&').replace('&#39;', "'")
++        if not url_is_valid(url):
++            return m.group(0)
++        href = jump_href(url) if jump else html_escape(url)
++        return f'<a href="{href}" target="_blank" rel="noopener noreferrer nofollow">{dsp}</a>' + tail
++
++    return re.sub(r"https?://(?:[A-Za-z0-9\-._~:/?#\[\]@!$*+,;=%()]|&amp;|&#39;)+", repl, escaped)
++
++
++def reply_form(res, links='', locked=False):
++    """レス用フォーム(1行で返す。スレッドファイルのパーサが行単位のため)。鍵つきスレッドは認証キーの欄が付く"""
+     return (
+         '<form method=post action="../amezo.cgi" class="post">'
+         f'<input type=hidden name="res" value="{res}">'
+         '<div class="row">投稿者 <input type=text name="name" size=20> '
+         'メール <input type=text name="mail" size=20 maxlength=50></div>'
+-        '<textarea name="comm" rows=4 cols=70 maxlength=400></textarea>'
++        + ('<div class="row">🔒 認証キー <input type=password name="key" size=32 autocomplete=off required>'
++           ' このスレッドは認証キーがないと書き込めません</div>' if locked else '')
++        + '<textarea name="comm" rows=4 cols=70 maxlength=400></textarea>'
+         '<div class="row"><input type=submit value="↑へのレスカキコ"></div>'
+         f'{links}'
+         '</form>'
+     )
+ 
++# ---- 認証キー (鍵つきスレッド): <板>/<スレ番号>.lock があれば、書き込みにキーが要る ----------
++
++def thread_is_locked(folder, res):
++    return os.path.isfile(f'./{folder}/{res}.lock')
++
++
++def base32_encode_bytes(b):
++    return base64.b32encode(b).decode('ascii').rstrip('=')
++
++
++def key_normalize(s):
++    """入力されたキーを正規の形 (大文字24文字) にそろえる。形が違えば None"""
++    c = re.sub(r'[^A-Za-z2-7]', '', s).upper()
++    return c if len(c) == 24 else None
++
++
++def key_display(canon):
++    return '-'.join(canon[i:i + 4] for i in range(0, len(canon), 4))
++
++
++def key_secret_key():
++    key = load_secret(KEY_SECRET_FILE)
++    if not key:
++        error('認証キー用の鍵を保存できません.')
++    return key
++
++
++def key_hash(canon):
++    return hmac.new(key_secret_key(), (KEY_CTX + canon).encode('utf-8'), hashlib.sha256).hexdigest()
++
++
++def _parse_key_row(line):
++    p = line.rstrip('\r\n').split('\t')
++    if len(p) != 6:
++        return None
++    m = re.match(r'-?\d+', p[4])
++    return {'id': p[0], 'label': p[1], 'hash': p[2], 'scope': p[3],
++            'created': int(m.group()) if m else 0, 'status': p[5]}
++
++
++def keys_load(folder):
++    """keys.txt の全行 (管理画面用。キーは板ごとに数が少ない前提)"""
++    rows = []
++    try:
++        with open(f'./{folder}/{KEYS_FILE}', 'r', encoding='utf-8') as f:
++            for line in f:
++                row = _parse_key_row(line)
++                if row is not None:
++                    rows.append(row)
++    except OSError:
++        pass
++    return rows
++
++
++def key_find_row(folder, kid):
++    """投稿のときの照合用: ID の行だけを、1行ずつ読んで探す"""
++    try:
++        with open(f'./{folder}/{KEYS_FILE}', 'r', encoding='utf-8') as f:
++            for line in f:
++                if line.startswith(kid + '\t'):
++                    return _parse_key_row(line)
++    except OSError:
++        pass
++    return None
++
++
++def key_verify(folder, res, input_key):
++    """キーがこのスレッドに書き込めるか。失効・範囲外・存在しない・形が違う、はどれも False (区別しない)"""
++    canon = key_normalize(input_key)
++    if canon is None:
++        return False
++    row = key_find_row(folder, canon[:4])
++    if row is None or row['status'] != 'active':
++        return False
++    if not hmac.compare_digest(row['hash'], key_hash(canon)):
++        return False
++    return row['scope'] == '*' or row['scope'] == res
++
++
++def keys_update(folder, fn):
++    """keys.txt を排他ロックして、fn(全行) の結果で書き直す (一時ファイル + rename)。失敗したら False"""
++    try:
++        lk = open(f'./{folder}/keys.lock', 'a+')
++    except OSError:
++        return False
++    with lk:
++        fcntl.flock(lk, fcntl.LOCK_EX)
++        rows = fn(keys_load(folder))
++        path = f'./{folder}/{KEYS_FILE}'
++        tmp = f'{path}.tmp{os.getpid()}'
++        ok = False
++        try:
++            old = os.umask(0o077)
++            try:
++                W = open(tmp, 'w', encoding='utf-8', newline='')
++            finally:
++                os.umask(old)
++            with W:
++                for r in rows:
++                    W.write('\t'.join([r['id'], r['label'], r['hash'], r['scope'], str(r['created']), r['status']]) + '\n')
++            os.replace(tmp, path)
++            ok = True
++        except OSError:
++            try:
++                os.unlink(tmp)
++            except OSError:
++                pass
++        fcntl.flock(lk, fcntl.LOCK_UN)
++    return ok
++
++
++def key_issue(folder, label, scope):
++    """管理者がキーを発行する。戻り値: (ID, 表示用のキー) の組 (この1回しか見られない)。保存できなければ None"""
++    label = re.sub(r'[\x00-\x1f\x7f]', ' ', label).strip()
++    label = label[:40]
++    if label == '':
++        label = '(無題)'
++    if scope != '*' and not re.fullmatch(r'\d{1,20}', scope):
++        return None
++    result = {}
++
++    def fn(rows):
++        used = {r['id'] for r in rows}
++        while True:
++            canon = base32_encode_bytes(os.urandom(15))      # 120bit = 24文字。先頭4文字が ID
++            kid = canon[:4]
++            if kid not in used:
++                break
++        rows.append({'id': kid, 'label': label, 'hash': key_hash(canon), 'scope': scope,
++                     'created': int(time.time()), 'status': 'active'})
++        result['id'] = kid
++        result['display'] = key_display(canon)
++        return rows
++
++    if not keys_update(folder, fn):
++        return None
++    return result['id'], result['display']
++
++
++def key_revoke(folder, kid):
++    hit = [False]
++
++    def fn(rows):
++        for r in rows:
++            if r['id'] == kid and r['status'] == 'active':
++                r['status'] = 'revoked'
++                hit[0] = True
++        return rows
++
++    return keys_update(folder, fn) and hit[0]
++
++
++def thread_set_lock(folder, res, lock):
++    """スレッドに鍵をかける/外す。返信フォームの行を差し替え、印 (.lock) を作る/消す。
++    投稿側も同じスレッドのロックの中で .lock を確認するので、フォームと実際の状態がずれない。"""
++    path = f'./{folder}/{res}.html'
++    if not os.path.isfile(path):
++        return False
++    try:
++        W = open(path, 'r+b')
++    except OSError:
++        return False
++    with W:
++        fcntl.flock(W, fcntl.LOCK_EX)
++        data = W.read()
++        idx = data.rfind(b'\n<form')
++        footer = idx + 1 if idx >= 0 else len(data)
++        new = (reply_form(res, '', lock) + '</body></html>\n').encode('utf-8')
++        W.seek(footer)
++        W.write(new)
++        W.truncate()
++        W.flush()
++        lockfile = f'./{folder}/{res}.lock'
++        try:
++            if lock:
++                with open(lockfile, 'w'):
++                    pass
++            elif os.path.exists(lockfile):
++                os.unlink(lockfile)
++        except OSError:
++            return False
++    return True
++
+ # ---- 表示処理 -----------------------------------------------------
+ 
+ def res_view(folder, form):
+@@ -434,35 +879,54 @@ def res_view(folder, form):
+         thread_missing(folder, res, '表示')
+ 
+     sys.stdout.write("Content-type: text/html; charset=UTF-8\r\n\r\n")
++    fol_tag = f'<input type="hidden" name="folder" value="{html.escape(folder, quote=True)}">'
++
++    def fixj(line):
++        # / 直下から出力するので、中継リンクの相対パスを直す
++        return line.replace('href="../jump.cgi?', 'href="jump.cgi?') if '../jump.cgi?' in line else line
++
++    def form_line(line):
++        # 返信フォームの行は、action を板のない位置に直し、folder を足して出す
++        return line.replace('action="../', 'action="').replace('</form>', f'{fol_tag}</form>')
++
+     with open(file_path, 'r', encoding='utf-8') as rf:
+         for line in rf:
+-            line = line.replace('href="../style.css"', 'href="style.css"').replace('src="../hide.js"', 'src="hide.js"')
++            line = line.replace('href="../style.css"', 'href="style.css"').replace('src="../hide.js"', 'src="hide.js"').replace('href="../jump.cgi?', 'href="jump.cgi?')
+             sys.stdout.write(line)
+             if '<dl>' in line or '<dt>' in line:
+                 break
+ 
++        matched = False
++        footer = None
+         for line in rf:
++            if line.startswith('<form'):
++                footer = line
+             m = re.search(r'<dt>(\d+)', line)
+             if m and int(m.group(1)) >= from_idx:
+-                sys.stdout.write(line)
++                sys.stdout.write(fixj(line))
++                matched = True
+                 break
+ 
+-        fol_tag = f'<input type="hidden" name="folder" value="{html.escape(folder, quote=True)}">'
++        if not matched and footer is not None:     # from が大きすぎても、返信フォームは出す
++            sys.stdout.write(form_line(footer))
++
+         for line in rf:
+-            if '</form>' in line:
+-                line = line.replace('action="../', 'action="')
+-                line = line.replace('</form>', f'{fol_tag}</form>')
+-            sys.stdout.write(line)
++            sys.stdout.write(form_line(line) if '</form>' in line else fixj(line))
+     sys.exit(0)
+ 
+ # ---- 過去ログ一覧 -----------------------------------------------------
+ 
+ def read_thread_title(path):
+-    """スレッドのファイルの1行目から題名を取り出す (読めなければ '')"""
++    """スレッドのファイルの1行目から題名を取り出す (読めなければ '')。.gz の過去ログも読む"""
+     try:
+-        with open(path, 'r', encoding='utf-8') as rf:
+-            m = re.search(r'<b>([^<]*)</b>', rf.readline())
+-            return m.group(1) if m else ''
++        if path.endswith('.gz'):
++            with gzip_module.open(path, 'rb') as rf:
++                first = rf.readline().decode('utf-8', errors='replace')
++        else:
++            with open(path, 'r', encoding='utf-8') as rf:
++                first = rf.readline()
++        m = re.search(r'<b>([^<]*)</b>', first)
++        return m.group(1) if m else ''
+     except OSError:
+         return ''
+ 
+@@ -478,10 +942,13 @@ def kako_list_size(folder):
+ def append_kako_list(folder, items):
+     """今回退避したスレッド [(更新時刻の文字列, 'o数字.html'), ...] の題名を kako.txt に追記する。
+     退避は古いものから順に起きるので、追記すれば古い順のままになる。"""
++    buf = ''
++    for ts, name in sorted(items):
++        buf += f"{name}{KAKO_SEP}{read_thread_title(archived_path(folder, name) or f'./{folder}/{name}')}\n"
+     try:
+         with open(f"./{folder}/{KAKO_LIST}", 'a', encoding='utf-8', newline='') as W:
+-            for ts, name in sorted(items):
+-                W.write(f"{name}{KAKO_SEP}{read_thread_title(f'./{folder}/{name}')}\n")
++            fcntl.flock(W, fcntl.LOCK_EX)
++            W.write(buf)
+         return True
+     except OSError:
+         return False
+@@ -492,7 +959,7 @@ def rebuild_kako_list(folder, names):
+     items = []
+     for name in names:
+         try:
+-            mtime = int(os.path.getmtime(f"./{folder}/{name}"))
++            mtime = int(os.path.getmtime(archived_path(folder, name) or f"./{folder}/{name}"))
+         except OSError:
+             mtime = 0
+         items.append((f"{mtime:011d}", name))
+@@ -502,7 +969,7 @@ def rebuild_kako_list(folder, names):
+     try:
+         with open(tmp_path, 'w', encoding='utf-8', newline='') as W:
+             for ts, name in items:
+-                W.write(f"{name}{KAKO_SEP}{read_thread_title(f'./{folder}/{name}')}\n")
++                W.write(f"{name}{KAKO_SEP}{read_thread_title(archived_path(folder, name) or f'./{folder}/{name}')}\n")
+         os.chmod(tmp_path, 0o644)
+         os.replace(tmp_path, path)
+         return True
+@@ -514,19 +981,35 @@ def rebuild_kako_list(folder, names):
+         return False
+ 
+ 
+-def write_kako(folder, body_tag, title0, amezo_name, main_title_suffix, title):
+-    """過去ログの一覧 板/kako.html を、kako.txt から作る (新しい退避が上)。
+-    失敗しても投稿処理は止めない (一覧が古いままになるだけ)。"""
+-    entries = []
++def reverse_lines(path):
++    """ファイルを末尾から1行ずつ返す (新しい順に読みたいが、全体をメモリに載せたくないとき用)"""
+     try:
+-        with open(f"./{folder}/{KAKO_LIST}", 'r', encoding='utf-8') as rf:
+-            for line in rf:
+-                name, sep, ttl = line.rstrip('\r\n').partition(KAKO_SEP)
+-                if sep and re.match(r'^o\d+\.html$', name):    # 壊れた行は読み飛ばす
+-                    entries.append((name, ttl))
++        fp = open(path, 'rb')
+     except OSError:
+         return
+-    entries.reverse()
++    with fp:
++        fp.seek(0, os.SEEK_END)
++        pos = fp.tell()
++        carry = b''
++        while pos > 0:
++            n = min(65536, pos)
++            pos -= n
++            fp.seek(pos)
++            parts = (fp.read(n) + carry).split(b'\n')
++            carry = parts.pop(0)               # 欠けている先頭の行は、さらに前の塊とつなげる
++            for part in reversed(parts):
++                if part:
++                    yield part.decode('utf-8', errors='replace')
++        if carry:
++            yield carry.decode('utf-8', errors='replace')
++
++
++def write_kako(folder, body_tag, title0, amezo_name, main_title_suffix, title):
++    """過去ログの一覧 板/kako.html を、kako.txt から作る (新しい退避が上。末尾から少しずつ読む)。
++    失敗しても投稿処理は止めない (一覧が古いままになるだけ)。"""
++    list_path = f"./{folder}/{KAKO_LIST}"
++    if not os.path.isfile(list_path):
++        return
+     kako_path = f"./{folder}/{KAKO_FILE}"
+     tmp_path = f"{kako_path}.tmp{os.getpid()}"
+     try:
+@@ -542,7 +1025,12 @@ def write_kako(folder, body_tag, title0, amezo_name, main_title_suffix, title):
+                 f'<div class="row links"><a href="./">板へ戻る</a></div>\n'
+                 f'<font size=2>\n'
+             )
+-            for i, (name, ttl) in enumerate(entries, 1):
++            i = 0
++            for line in reverse_lines(list_path):     # 新しい退避が上。全部は読み込まない
++                name, sep, ttl = line.partition(KAKO_SEP)
++                if not sep or not re.fullmatch(r'o\d+\.html', name):    # 壊れた行は読み飛ばす
++                    continue
++                i += 1
+                 W.write(f' {i}<a href="{name}">{ttl}</a>\n')
+             W.write('</font>\n<hr></body></html>\n')
+         os.chmod(tmp_path, 0o644)
+@@ -557,36 +1045,57 @@ def write_kako(folder, body_tag, title0, amezo_name, main_title_suffix, title):
+ 
+ # ---- ページ送り・スレッドの読み込み ------------------------------------------
+ 
++def count_threads(folder):
++    """表示中のスレッド数 (ファイル名を1つずつ見て数える。退避済みの大量のファイルがあっても溜めない)"""
++    n = 0
++    try:
++        entries = os.listdir(f'./{folder}')
++    except OSError:
++        return 0
++    for f in entries:
++        if f and '0' <= f[0] <= '9' and re.fullmatch(r'\d+\.html', f):
++            n += 1
++    return min(n, MAX_THREADS) if MAX_THREADS > 0 else n
++
++
++def total_pages(n_threads):
++    return max(1, (n_threads + PER_PAGE - 1) // PER_PAGE)
++
++
++def page_clamp(folder, page):
++    """ページ番号を、実在するページ (1〜最後のページ) に直す。範囲外は最後のページ"""
++    if page <= 1:
++        return 1
++    return min(page, total_pages(count_threads(folder)))
++
++
+ def pager_html(folder, page, total):
+-    """ページ送り: ← 前の20件　1 2 [3] 4 5　次の20件 →  (ページが1つだけなら空)
+-    2ページ目以降のリンクは CGI (amezo.cgi?folder=板&page=N) を通る。ページのファイルが古ければ作り直して案内する。"""
++    """ページ送りのリンク。1ページしか無いときは何も出さない。
++    10ページ以下なら全部の番号、11ページ以上なら 1・最後・現在の前後2つだけ出して、間は … にする。
++    2ページ目以降のリンクは CGI (amezo.cgi?folder=板&page=N) を通る。"""
+     if total <= 1:
+         return ''
+     q = urllib.parse.quote(folder, safe='')
+ 
+-    def link(p, label):
+-        href = './' if p == 1 else f'../amezo.cgi?folder={q}&amp;page={p}'
+-        return f'<a href="{href}">{label}</a>'
++    def href(p):
++        return './' if p == 1 else f'../amezo.cgi?folder={q}&amp;page={p}'
+ 
+-    shown = sorted({1, total} | set(range(max(1, page - 3), min(total, page + 3) + 1)))
+-    items = []
+-    prev = 0
+-    for p in shown:
+-        if p - prev > 1:
+-            items.append('…')
+-        items.append(f'<b>{p}</b>' if p == page else link(p, str(p)))
+-        prev = p
+-    parts = []
++    nums = []
++    last = 0
++    for p in range(1, total + 1):
++        if total > 10 and p != 1 and p != total and abs(p - page) > 2:
++            continue
++        if last and p - last > 1:
++            nums.append('…')
++        nums.append(f'<b>[{p}]</b>' if p == page else f'<a href="{href(p)}">{p}</a>')
++        last = p
++    segments = []
+     if page > 1:
+-        parts.append(link(page - 1, f'← 前の{PER_PAGE}件'))
+-    parts.append(' '.join(items))
++        segments.append(f'<a href="{href(page - 1)}">← 前の{PER_PAGE}件</a>')
++    segments.append(' '.join(nums))
+     if page < total:
+-        parts.append(link(page + 1, f'次の{PER_PAGE}件 →'))
+-    return '<div class="row pager">' + '　'.join(parts) + '</div>\n'
+-
+-
+-def total_pages(n_threads):
+-    return max(1, (n_threads + PER_PAGE - 1) // PER_PAGE)
++        segments.append(f'<a href="{href(page + 1)}">次の{PER_PAGE}件 →</a>')
++    return '<div class="row links pager">' + '　'.join(segments) + '</div>\n'
+ 
+ 
+ def scan_threads(folder, want_old=True):
+@@ -594,6 +1103,7 @@ def scan_threads(folder, want_old=True):
+     同じ秒のときはファイル名の新しい順 (並びを毎回同じにするため)。"""
+     files = []
+     old_names = []      # 退避済み (o数字.html) のファイル名。更新日時などは調べない
++    old_seen = set()
+     try:
+         for f_name in os.listdir(f"./{folder}"):
+             if re.match(r'^\d+\.html$', f_name):
+@@ -602,8 +1112,11 @@ def scan_threads(folder, want_old=True):
+                 except OSError:
+                     mtime = 0
+                 files.append((f"{mtime:011d}", f_name))
+-            elif want_old and re.match(r'^o\d+\.html$', f_name):
+-                old_names.append(f_name)
++            elif want_old:
++                m_old = re.match(r'^(o\d+\.html)(?:\.gz)?$', f_name)   # 平文と gz が両方あっても1つ。.gz.tmp* は含まない
++                if m_old and m_old.group(1) not in old_seen:
++                    old_seen.add(m_old.group(1))
++                    old_names.append(m_old.group(1))
+     except OSError:
+         pass
+     files.sort(key=lambda x: (x[0], x[1]), reverse=True)
+@@ -750,7 +1263,7 @@ def write_index_page(W, folder, page, total, files, v):
+         links = (f'<div class="row links"><a href="{res_id}.html">レス全部を見る</a> '
+                  f'{sub_tag}<a href="#top">上へ</a> <a href="./">リロード</a></div>')
+ 
+-        W.write('</font></td></tr></table>\n' + reply_form(res_id, links) + '<hr>\n')
++        W.write('</font></td></tr></table>\n' + reply_form(res_id, links, thread_is_locked(folder, res_id)) + '<hr>\n')
+ 
+     W.write(pager + '<hr></body></html>\n')
+ 
+@@ -896,7 +1409,8 @@ def regen_index(folder, page=1, reload_flag=False, use_cache=True):
+         return index_name, 'busy'
+ 
+     # ディレクトリ走査してヘッドラインをソート生成
+-    files, old_names = scan_threads(folder)
++    # 退避済みの名前は、過去ログ一覧を作り直すときだけ集める (何万本あっても普段は溜めない)
++    files, old_names = scan_threads(folder, want_old=(kako_list_size(folder) <= 0))
+     retired_now = []    # 今回の再生成で新しく退避した [(更新時刻の文字列, 'o数字.html'), ...]
+ 
+     # 古いスレッドを退避 (oスレッドID.html)
+@@ -906,10 +1420,14 @@ def regen_index(folder, page=1, reload_flag=False, use_cache=True):
+         for ts, f_name in files:
+             n_thr += 1
+             if n_thr > MAX_THREADS:
+-                if not os.path.exists(f"./{folder}/o{f_name}"):
++                if not archived_exists(folder, f_name[:-5]):
+                     try:
+                         os.rename(f"./{folder}/{f_name}", f"./{folder}/o{f_name}")
+                         retired_now.append((ts, f"o{f_name}"))
++                        try:
++                            os.unlink(f"./{folder}/{f_name[:-5]}.lock")   # 過去ログは書き込めないので、鍵の印は要らない
++                        except OSError:
++                            pass
+                     except OSError:
+                         pass
+             else:
+@@ -942,6 +1460,18 @@ def regen_index(folder, page=1, reload_flag=False, use_cache=True):
+         write_kako(folder, f'<body{bg_attr} bgcolor="{color}"{text_attr}>',
+                    title0, amezo_name, main_title_suffix, title)
+ 
++    # 古い「次のページ」のファイルを掃除する
++    try:
++        for f_name in os.listdir(f"./{folder}"):
++            if re.fullmatch(r'index[0-9].*\.html', f_name):
++                try:
++                    if time.time() - os.path.getmtime(f"./{folder}/{f_name}") > 600:
++                        os.unlink(f"./{folder}/{f_name}")
++                except OSError:
++                    pass
++    except OSError:
++        pass
++
+     try:
+         fcntl.flock(LK, fcntl.LOCK_UN)
+         LK.close()
+@@ -1057,17 +1587,17 @@ def main():
+     if 'sub' in form and len(form['sub']):
+         res_view(folder, form)
+ 
+-    # ページ指定: ページ送りのリンク (?page=N)。古いフォームの next (開始位置) も、ページに直して受け付ける
+-    page = None
+-    page_val = form.get('page', query_params.get('page'))
+-    if page_val is not None:
+-        page = int(page_val) if re.match(r'^\d{1,6}$', page_val) else 1
+-    elif 'next' in form:
+-        next_val = form['next']
+-        if not re.match(r'^\d{1,6}$', next_val):
+-            next_val = '1'
+-        if int(next_val) >= 2:
+-            page = (int(next_val) - 1) // PER_PAGE + 1
++    # ページ指定: ページ送りのリンク (?page=N)。POST でも GET でも受ける。実在するページにだけ飛ぶ (範囲外は最後のページ)。
++    # 古いフォームの next (開始位置) も、ページに直して受け付ける
++    page_raw = form['page'] if 'page' in form else query_params.get('page', '')
++    next_raw = form['next'] if 'next' in form else query_params.get('next', '')
++    if re.match(r'^\d{1,6}$', page_raw):
++        page = int(page_raw)
++    elif re.match(r'^\d{1,6}$', next_raw):
++        page = (max(1, int(next_raw)) - 1) // PER_PAGE + 1
++    else:
++        page = 1
++    page = page_clamp(folder, page)
+ 
+     reload_flag = False
+     if name == subj and name == comm:
+@@ -1121,7 +1651,7 @@ def main():
+         except OSError:
+             pass
+ 
+-    if page is None and not reload_flag:
++    if page == 1 and not reload_flag:
+         # キャップ (cap.txt の名前とパスワードに一致したとき) は、管理者名の置き換えをしない
+         cap_ok = is_cap(name, trip_pw)
+ 
+@@ -1148,7 +1678,7 @@ def main():
+         if subj:
+             check_global_ip(ip)
+ 
+-        comm = re.sub(r'(https?\:[\w\.\~\-\/\?\+\=\:\@\%\;\#\&]+)', url_link, comm)
++        comm = linkify_urls(comm)
+         trip = ''
+         if cap_ok:
+             name += CAP_MARK
+@@ -1172,7 +1702,7 @@ def main():
+         if subj:
+             for try_cnt in range(31):
+                 file_path = f"./{folder}/{res}.html"
+-                if not os.path.exists(f"./{folder}/x{res}.html") and not os.path.exists(f"./{folder}/o{res}.html"):
++                if not os.path.exists(f"./{folder}/x{res}.html") and not archived_exists(folder, res):
+                     try:
+                         fd = os.open(file_path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o644)
+                         W = os.fdopen(fd, 'r+', encoding='utf-8')
+@@ -1189,6 +1719,29 @@ def main():
+                 thread_missing(folder, res, '返信')
+ 
+         fcntl.flock(W, fcntl.LOCK_EX)
++        # 返信: ロックを待っているあいだに、過去ログの圧縮 (archive.py) がこのファイルの名前を消していたら (nlink = 0)、
++        # 書き込んでも、どこにも残らない。成功したように見せずに、エラーにする。
++        # (圧縮側は、消す直前に同じファイルの flock を取って確認するので、この確認と書き込みのあいだに消されることもない)
++        if not subj:
++            try:
++                nlink = os.fstat(W.fileno()).st_nlink
++            except OSError:
++                nlink = 1
++            if nlink == 0:
++                W.close()
++                thread_missing(folder, res, '返信')
++
++        # 鍵つきスレッド: 状態の確認からフォームの書き込みまで、同じロックの中でやる (管理者の鍵のかけ外しとずれない)
++        locked = not subj and thread_is_locked(folder, res)
++        if locked:
++            given = form.get('key', '')
++            if given == '':
++                W.close()
++                error('このスレッドは認証キーが必要です。ページを再読み込みして、認証キーの欄に入力してください。')
++            if not key_verify(folder, res, given):
++                W.close()
++                error('認証キーが正しくありません。')
++
+         cnt = 0
+         pos = 0
+         prev = ""
+@@ -1226,15 +1779,13 @@ def main():
+         new_line = (f"{subj1}<dl><dt>{cnt}{subj2}投稿者：<font color=forestgreen><b>{name} </b></font>"
+                     f"{meta}　投稿日：{date_str} ID:{post_id}</font><br><dd>{comm} </dl>\n")
+         W.write(new_line)
+-        W.write(reply_form(res) + '</body></html>\n')
++        W.write(reply_form(res, '', locked) + '</body></html>\n')
+         W.truncate()
+         W.flush()
+         W.close()
+         touch_lasttime(folder)
+ 
+-    if page is not None:
+-        reload_flag = True                      # ページを見るだけ (1ページ目も、直近なら作り直さない)
+-    index_name, _ = regen_index(folder, page or 1, reload_flag)
++    index_name, _ = regen_index(folder, page, reload_flag)
+     redirect(folder, index_name)
+ 
+ 
+diff --git a/archive.py b/archive.py
+new file mode 100644
+index 0000000..454dab8
+--- /dev/null
++++ b/archive.py
+@@ -0,0 +1,689 @@
++# -*- coding: utf-8 -*-
++#
++# archive.py - 退避済みの過去ログ (oN.html) を gzip -6 で oN.html.gz にする (CLI 専用。投稿の外で動かす)
++#
++#   python3 archive.py 板名… | --all  [--quiet=秒] [--limit=件数] [--dry-run] [-v]
++#   python3 archive.py --restore 板名 oN        (gz から平文を作る。gz は残す)
++#   python3 archive.py --selftest [板名]        (nlink / flock / rename / 更新日時 / gzip が、この環境で働くかを確認)
++#
++# 段階1: 平文から oN.html.gz を作る (平文は残す)。
++# 段階2: gz の作成から十分たち、gz が平文と同期し、中身が一致するときだけ、平文を消す (消す直前に平文の flock を取って再確認)。
++# 投稿側 (amezo.py) は、flock を取った直後に nlink を確認する。この2つが組になって、投稿の静かな消失を防ぐ。
++# 安全の保証はこの構造が担う。--quiet (既定 ARCHIVE_QUIET_SECONDS) の待機は、無駄を減らす工夫にすぎない。
++#
++# archive.php の Python 移植。挙動・出力文言・終了コードは PHP 版に合わせる。
++
++import sys
++import os
++import re
++import time
++import fcntl
++import hashlib
++import shutil
++import struct
++import subprocess
++import select
++import resource
++
++try:
++    import gzip
++except ImportError:
++    gzip = None
++
++# スクリプトのあるディレクトリに固定 (amezo.py / lib.php と同じ。相対パス ./blist.txt などの基準)
++try:
++    os.chdir(os.path.dirname(os.path.abspath(__file__)))
++except Exception:
++    pass
++
++
++def _local_is_board(folder):
++    """amezo.is_board が使えないときの代替 (blist.txt の1列目と一致するか)"""
++    try:
++        with open('./blist.txt', 'r', encoding='utf-8') as f:
++            for line in f:
++                line = line.rstrip('\r\n')
++                if line and line.split(',')[0] == folder:
++                    return True
++    except FileNotFoundError:
++        pass
++    return False
++
++
++# amezo.py から設定と板判定を借りる。import できない・名前が無い場合は代替で動く
++ARCHIVE_QUIET_SECONDS = 600
++is_board = _local_is_board
++try:
++    import amezo
++    _q = getattr(amezo, 'ARCHIVE_QUIET_SECONDS', None)
++    if isinstance(_q, int) and 0 <= _q <= 604800:
++        ARCHIVE_QUIET_SECONDS = _q
++    if callable(getattr(amezo, 'is_board', None)):
++        is_board = amezo.is_board
++except Exception:
++    pass
++
++ARCH_LOCK_TRIES = 50            # 平文のロックを待つ回数 (0.1秒おき = 最大5秒)
++ARCH_TMP_MAX_AGE = 86400        # これより古い一時ファイル (.gz.tmp*) は掃除する
++CHUNK = 65536
++
++
++def arch_out(s):
++    sys.stdout.write(s + "\n")
++    sys.stdout.flush()
++
++
++def arch_err(s):
++    sys.stderr.write(s + "\n")
++
++
++def arch_mb(b):
++    return f"{b / 1048576:.2f}MB"
++
++
++class ArchStat:
++    __slots__ = ('size', 'mtime', 'ctime')
++
++    def __init__(self, st):
++        self.size = st.st_size
++        self.mtime = int(st.st_mtime)
++        self.ctime = int(st.st_ctime)
++
++
++def arch_stat(p):
++    """stat を新しく読む。読めなければ None"""
++    try:
++        return ArchStat(os.stat(p))
++    except OSError:
++        return None
++
++
++def arch_file_digest(p):
++    """[sha256, 長さ]。読めなければ None"""
++    try:
++        f = open(p, 'rb')
++    except OSError:
++        return None
++    h = hashlib.sha256()
++    n = 0
++    with f:
++        while True:
++            b = f.read(CHUNK)
++            if b == b'':
++                break
++            n += len(b)
++            h.update(b)
++    return [h.hexdigest(), n]
++
++
++def arch_gz_digest(gz):
++    """gz を最後まで展開して [sha256, 長さ] を返す。開けなければ None"""
++    if gzip is None:
++        return None
++    try:
++        g = gzip.open(gz, 'rb')
++    except OSError:
++        return None
++    h = hashlib.sha256()
++    n = 0
++    try:
++        with g:
++            while True:
++                b = g.read(CHUNK)
++                if b == b'':
++                    break
++                n += len(b)
++                h.update(b)
++    except Exception:
++        return None
++    return [h.hexdigest(), n]
++
++
++def arch_gz_isize(gz):
++    """gz 末尾4バイト (ISIZE = 元のサイズ。4GiB で折り返す)"""
++    try:
++        with open(gz, 'rb') as f:
++            f.seek(-4, os.SEEK_END)
++            b = f.read(4)
++    except OSError:
++        return None
++    return struct.unpack('<I', b)[0] if len(b) == 4 else None
++
++
++_PLAIN_RE = re.compile(r'o(\d+)\.html')
++_GZ_RE = re.compile(r'o(\d+)\.html\.gz')
++_TMP_RE = re.compile(r'o\d+\.html\.gz\.tmp\d*')
++
++
++def arch_scan(folder):
++    """板フォルダの中の、過去ログを数える。(平文, gz (どちらも 名前 => 番号), 一時ファイルのパス)"""
++    plain = {}
++    gz = {}
++    tmp = []
++    try:
++        files = os.listdir(f"./{folder}")
++    except OSError:
++        return {}, {}, []
++    for name in files:
++        if not name.startswith('o'):
++            continue
++        m = _PLAIN_RE.fullmatch(name)
++        if m:
++            plain[name] = int(m.group(1))
++            continue
++        m = _GZ_RE.fullmatch(name)
++        if m:
++            gz[name[:-3]] = int(m.group(1))
++            continue
++        if _TMP_RE.fullmatch(name):
++            tmp.append(f"./{folder}/{name}")
++    plain = dict(sorted(plain.items(), key=lambda kv: kv[1]))
++    gz = dict(sorted(gz.items(), key=lambda kv: kv[1]))
++    return plain, gz, tmp
++
++
++class Archiver:
++    def __init__(self, quiet, dry, verbose):
++        self.quiet = quiet
++        self.dry = dry
++        self.verbose = verbose
++        self.c = {'compressed': 0, 'plain_removed': 0, 'stale_gz_removed': 0,
++                  'quarantined': 0, 'ng': 0, 'in': 0, 'out': 0, 'skip': {}}
++
++    def say(self, path, msg):
++        arch_out(f"{path.lstrip('./'):<34} {msg}")
++
++    def skip(self, path, reason):
++        self.c['skip'][reason] = self.c['skip'].get(reason, 0) + 1
++        if self.verbose:
++            self.say(path, f"skip: {reason}")
++        return False
++
++    def ng(self, path, msg):
++        self.c['ng'] += 1
++        self.say(path, f"NG: {msg}")
++        return False
++
++    def stage1(self, plain):
++        """段階1: 平文から gz を作る。作った (dry-run では作る予定の) なら True"""
++        st = arch_stat(plain)
++        if st is None:
++            return self.skip(plain, 'ファイルが無い')
++        if int(time.time()) - st.mtime < self.quiet:
++            return self.skip(plain, '最後の書き込みから間もない')
++        try:
++            free = shutil.disk_usage(os.path.dirname(plain) or '.').free
++        except OSError:
++            free = None
++        if free is not None and free < st.size + 1048576:
++            return self.skip(plain, 'ディスクの空きが足りない')
++        if self.dry:
++            self.say(plain, f"[dry-run] 圧縮する ({arch_mb(st.size)})")
++            self.c['compressed'] += 1
++            return True
++        t0 = time.time()
++        gzpath = plain + '.gz'
++        tmp = gzpath + '.tmp' + str(os.getpid())
++        try:
++            fin = open(plain, 'rb')
++            fout = gzip.open(tmp, 'wb', compresslevel=6)
++        except Exception:
++            try:
++                fin.close()
++            except Exception:
++                pass
++            try:
++                os.unlink(tmp)
++            except OSError:
++                pass
++            return self.ng(plain, '開けない (権限・空き容量を確認)')
++        h = hashlib.sha256()
++        n = 0
++        with fin:
++            while True:                     # ストリーム: メモリは一定
++                b = fin.read(CHUNK)
++                if b == b'':
++                    break
++                n += len(b)
++                h.update(b)
++                fout.write(b)
++        try:
++            fout.close()
++            closed = True
++        except Exception:
++            closed = False
++        src = h.hexdigest()
++        d = arch_gz_digest(tmp) if closed else None    # 展開して、元と一致することを確かめる
++        if d is None or d[0] != src or d[1] != n:
++            try:
++                os.unlink(tmp)
++            except OSError:
++                pass
++            return self.ng(plain, '展開して確かめたら、元と一致しない (一時ファイルを消した)')
++        st2 = arch_stat(plain)                          # 圧縮している間に、元が書き換わっていないか
++        if st2 is None or st2.size != st.size or st2.mtime != st.mtime or n != st.size:
++            try:
++                os.unlink(tmp)
++            except OSError:
++                pass
++            return self.skip(plain, '圧縮している間に元が変わった')
++        try:
++            os.utime(tmp, (st.mtime, st.mtime))         # 更新日時を引き継ぐ (同期の印。kako の並びも保つ)
++        except OSError:
++            pass
++        try:
++            os.chmod(tmp, 0o644)
++        except OSError:
++            pass
++        try:
++            os.rename(tmp, gzpath)
++        except OSError:
++            try:
++                os.unlink(tmp)
++            except OSError:
++                pass
++            return self.ng(plain, 'rename できない')
++        gs = arch_stat(gzpath)
++        gsize = gs.size if gs is not None else 0
++        self.c['compressed'] += 1
++        self.c['in'] += st.size
++        self.c['out'] += gsize
++        self.say(plain, f"圧縮  {arch_mb(st.size)} → {arch_mb(gsize)} "
++                        f"({st.size / max(1, gsize):.1f}倍)  {(time.time() - t0) * 1000:.0f}ms")
++        return True
++
++    def stage2(self, plain):
++        """段階2: 平文と gz が両方あるとき、条件が全部合えば、平文を消す"""
++        gzpath = plain + '.gz'
++        sp = arch_stat(plain)
++        sg = arch_stat(gzpath)
++        if sp is None or sg is None:
++            return
++        if sg.mtime != sp.mtime:                        # 圧縮のあとに、平文が更新された → gz は古い
++            if self.dry:
++                self.say(plain, '[dry-run] 古い gz を削除する')
++                self.c['stale_gz_removed'] += 1
++                return
++            try:
++                os.unlink(gzpath)
++            except OSError:
++                pass
++            self.c['stale_gz_removed'] += 1
++            self.say(plain, '古い gz を削除 (平文が圧縮のあとに更新された。次回に再圧縮する)')
++            return
++        if int(time.time()) - sg.ctime < self.quiet:
++            self.skip(plain, 'gz の作成から間もない')
++            return
++        if sp.size >= 4294967296:
++            self.skip(plain, '4GiB 以上は確認できない')
++            return
++        isize = arch_gz_isize(gzpath)
++        dp = arch_file_digest(plain)
++        dg = arch_gz_digest(gzpath)
++        if isize != sp.size or dp is None or dg is None or dp[0] != dg[0] or dp[1] != dg[1]:
++            # どちらが壊れているかは判定できない。何も消さず、gz を脇へ退避する (平文が配信され続ける。gz が正しければ、証拠として残る)
++            if self.dry:
++                self.say(plain, '[dry-run] NG: gz の中身が平文と一致しない → gz を .bad に改名する')
++                self.c['ng'] += 1
++                return
++            try:
++                os.rename(gzpath, gzpath + '.bad')
++            except OSError:
++                pass
++            self.c['quarantined'] += 1
++            self.ng(plain, 'gz の中身が平文と一致しない。どちらも消さず、gz を oN.html.gz.bad に改名した (人が確認する)')
++            return
++        try:
++            fh = open(plain, 'rb')
++        except OSError:
++            self.skip(plain, 'ロックのために開けない')
++            return
++        got = False
++        for _ in range(ARCH_LOCK_TRIES):
++            try:
++                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
++                got = True
++                break
++            except OSError:
++                time.sleep(0.1)
++        if not got:
++            fh.close()
++            self.skip(plain, 'ロックが取れない (投稿中?)')
++            return
++        fst = os.fstat(fh.fileno())                     # ロックを取ったあとで、確認した内容のままか
++        same = fst.st_nlink > 0 and fst.st_size == sp.size and int(fst.st_mtime) == sp.mtime
++        if not same:
++            fcntl.flock(fh, fcntl.LOCK_UN)
++            fh.close()
++            self.skip(plain, 'ロックを待つあいだに変わった (次回に判断する)')
++            return
++        if self.dry:
++            fcntl.flock(fh, fcntl.LOCK_UN)
++            fh.close()
++            self.say(plain, '[dry-run] 平文を削除する')
++            self.c['plain_removed'] += 1
++            return
++        try:
++            os.unlink(plain)                            # ロックを持ったまま消す。待っている投稿は、nlink = 0 で弾かれる
++            ok = True
++        except OSError:
++            ok = False
++        fcntl.flock(fh, fcntl.LOCK_UN)
++        fh.close()
++        if not ok:
++            self.ng(plain, '平文を消せない')
++            return
++        self.c['plain_removed'] += 1
++        self.say(plain, '平文を削除 (gz に置き換え)')
++
++
++_CHILD_LOCK_CODE = (
++    "import sys, fcntl, time\n"
++    "f = open(sys.argv[1], 'r+b')\n"
++    "fcntl.flock(f, fcntl.LOCK_EX)\n"
++    "print('L', flush=True)\n"
++    "time.sleep(5)\n"
++)
++
++
++def arch_selftest(dirpath, full=True):
++    """環境の確認。full = False (毎回の簡易版) は、ctime の確認で待たない。[(ラベル, OKか, 詳細)] を返す"""
++    r = []
++
++    def add(label, ok, detail=''):
++        r.append([label, bool(ok), detail])
++
++    add('gzip モジュールが使える', gzip is not None)
++    base = dirpath.rstrip('/') + '/.archive-selftest-' + str(os.getpid())
++    a = base + '.a'
++    b = base + '.b'
++    try:
++        try:
++            with open(a, 'w', encoding='utf-8') as f:
++                f.write("selftest\n")
++        except OSError:
++            add('フォルダに書き込める', False, dirpath)
++            return r
++        add('フォルダに書き込める', True)
++        h = open(a, 'r+b')
++        s = os.fstat(h.fileno())
++        add('通常のファイルの nlink は 1', s.st_nlink == 1, f'nlink={s.st_nlink}')
++        os.unlink(a)
++        s = os.fstat(h.fileno())
++        add('開いたまま unlink すると nlink が 0 になる', s.st_nlink == 0, f'nlink={s.st_nlink}')
++        h.close()
++        with open(a, 'w', encoding='utf-8') as f:
++            f.write("selftest\n")
++        h = open(a, 'r+b')
++        os.rename(a, b)
++        s = os.fstat(h.fileno())
++        add('開いたまま rename しても nlink は 1 のまま', s.st_nlink == 1, f'nlink={s.st_nlink}')
++        h.close()
++        os.utime(b, (1700000000, 1700000000))
++        s = arch_stat(b)
++        add('os.utime で更新日時 (mtime) を指定できる', s is not None and s.mtime == 1700000000)
++        c0 = s.ctime if s is not None else 0
++        if full:
++            time.sleep(1)
++        os.rename(b, a)
++        s = arch_stat(a)
++        add('rename で ctime が更新され、mtime は保たれる',
++            s is not None and (s.ctime > c0 if full else s.ctime >= c0) and s.mtime == 1700000000,
++            f'ctime {c0} → {s.ctime if s is not None else "?"}')
++        locked = False
++        try:
++            h = open(a, 'r+b')
++            try:
++                proc = subprocess.Popen([sys.executable, '-c', _CHILD_LOCK_CODE, a],
++                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
++            except OSError:
++                proc = None
++            if proc is not None:
++                line = ''
++                ready, _, _ = select.select([proc.stdout], [], [], 5)
++                if ready:
++                    line = proc.stdout.readline().decode('utf-8', 'replace')
++                if line.strip() == 'L':
++                    try:
++                        fcntl.flock(h, fcntl.LOCK_EX | fcntl.LOCK_NB)
++                        locked = False
++                    except OSError:
++                        locked = True     # 別プロセスが持っている間は、取れない
++                proc.terminate()
++                proc.wait()
++            h.close()
++        except OSError:
++            locked = False
++        add('別プロセスが持っている flock は、こちらからは取れない', locked)
++        try:
++            shutil.disk_usage(dirpath)
++            add('shutil.disk_usage が使える', True)
++        except OSError:
++            add('shutil.disk_usage が使える', False)
++    finally:
++        for p in (a, b):
++            try:
++                os.unlink(p)
++            except OSError:
++                pass
++    return r
++
++
++def arch_all_boards():
++    """板名の一覧 (blist.txt の1列目)"""
++    r = []
++    try:
++        with open('./blist.txt', 'r', encoding='utf-8') as f:
++            lines = f.read().splitlines()
++    except OSError:
++        lines = []
++    for line in lines:
++        name = line.split(',')[0]
++        if name != '':
++            r.append(name)
++    return r
++
++
++def arch_valid_board(b):
++    return b != '' and '/' not in b and '..' not in b and is_board(b) and os.path.isdir(f"./{b}")
++
++
++def arch_usage():
++    arch_err("使い方:\n"
++             "  python3 archive.py 板名… | --all [--quiet=秒] [--limit=件数] [--dry-run] [-v]\n"
++             "  python3 archive.py --restore 板名 oN\n"
++             "  python3 archive.py --selftest [板名]")
++    raise SystemExit(2)
++
++
++def arch_restore(folder, oname):
++    """gz から平文を作る (gz は残す)。終了コードを返す"""
++    m = re.fullmatch(r'o?(\d+)(?:\.html)?', oname or '')
++    if not arch_valid_board(folder) or m is None:
++        arch_usage()
++    plain = f"./{folder}/o{m.group(1)}.html"
++    gzpath = plain + '.gz'
++    try:
++        lk = open(f"./{folder}/archive.lock", 'a+')
++        fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
++    except OSError:
++        arch_err(f"板 {folder}: 別の archive.py が実行中です")
++        return 2
++    if not os.path.isfile(gzpath):
++        arch_err(f"{gzpath} が無い")
++        return 2
++    if os.path.exists(plain):
++        arch_err(f"{plain} がすでにある (上書きはしない)")
++        return 2
++    sg = arch_stat(gzpath)
++    tmp = plain + '.restore.tmp' + str(os.getpid())
++    try:
++        g = gzip.open(gzpath, 'rb')
++        o = open(tmp, 'wb')
++    except Exception:
++        arch_err('開けない')
++        try:
++            os.unlink(tmp)
++        except OSError:
++            pass
++        return 2
++    n = 0
++    try:
++        with g, o:
++            while True:
++                b = g.read(CHUNK)
++                if b == b'':
++                    break
++                n += len(b)
++                o.write(b)
++    except Exception:
++        pass                                        # 壊れた gz は、長さの照合で弾く
++    if n != arch_gz_isize(gzpath):
++        try:
++            os.unlink(tmp)
++        except OSError:
++            pass
++        arch_err('展開した長さが、gz の記録と一致しない (gz が壊れている?)')
++        return 1
++    try:
++        os.utime(tmp, (sg.mtime, sg.mtime))
++    except OSError:
++        pass
++    try:
++        os.chmod(tmp, 0o644)
++    except OSError:
++        pass
++    try:
++        os.rename(tmp, plain)
++    except OSError:
++        try:
++            os.unlink(tmp)
++        except OSError:
++            pass
++        arch_err('rename できない')
++        return 1
++    arch_out(f"{plain} を作った ({arch_mb(n)})。gz は残してある。")
++    arch_out('  編集すると更新日時が変わり、配信は平文に切り替わる (古い gz は次回の実行で消え、その次に再圧縮される)。')
++    arch_out('  編集しなければ、次回以降の実行で、この平文はまた消える。')
++    return 0
++
++
++_QUIET_RE = re.compile(r'--quiet=(\d{1,7})')
++_LIMIT_RE = re.compile(r'--limit=(\d{1,9})')
++
++
++def main(argv):
++    opt = {'quiet': ARCHIVE_QUIET_SECONDS, 'limit': 0, 'dry': False, 'v': False,
++           'all': False, 'restore': False, 'selftest': False}
++    boards = []
++    for a in argv:
++        if a == '--all':
++            opt['all'] = True
++        elif a == '--dry-run':
++            opt['dry'] = True
++        elif a == '-v':
++            opt['v'] = True
++        elif a == '--restore':
++            opt['restore'] = True
++        elif a == '--selftest':
++            opt['selftest'] = True
++        elif (m := _QUIET_RE.fullmatch(a)) and int(m.group(1)) <= 604800:
++            opt['quiet'] = int(m.group(1))
++        elif (m := _LIMIT_RE.fullmatch(a)) and int(m.group(1)) >= 1:
++            opt['limit'] = int(m.group(1))
++        elif a != '' and not a.startswith('-'):
++            boards.append(a)
++        else:
++            arch_usage()
++    if opt['restore']:
++        if len(boards) != 2:
++            arch_usage()
++        return arch_restore(boards[0], boards[1])
++    if opt['all']:
++        boards = arch_all_boards()
++    if opt['selftest']:
++        allb = arch_all_boards()
++        b = boards[0] if boards else (allb[0] if allb else '')
++        if not arch_valid_board(b):
++            arch_usage()
++        bad = 0
++        arch_out(f"自己チェック (フォルダ: ./{b})")
++        for label, ok, detail in arch_selftest(f"./{b}"):
++            arch_out(('OK   ' if ok else 'NG   ') + label + (f"  ({detail})" if detail != '' else ''))
++            if not ok:
++                bad += 1
++        arch_out('すべて OK。この環境で archive.py を使えます。' if bad == 0
++                 else f"NG が {bad} 件。この環境では archive.py を動かさないでください。")
++        return 0 if bad == 0 else 2
++    if not boards:
++        arch_usage()
++    for b in boards:
++        if not arch_valid_board(b):
++            arch_err(f"板 {b}: 見つからない (blist.txt とフォルダを確認)")
++            return 2
++    if gzip is None:
++        arch_err('gzip モジュールが使えません (Python の gzip が必要)')
++        return 2
++    if not opt['dry']:                              # 毎回、簡易の自己チェック (dry-run は何も書かないので省略)
++        bad = [r for r in arch_selftest(f"./{boards[0]}", full=False) if not r[1]]
++        if bad:
++            for label, _, _ in bad:
++                arch_err(f"自己チェック NG: {label}")
++            arch_err('この環境では動かしません。`python3 archive.py --selftest 板名` で詳細を確認してください。')
++            return 2
++
++    # ---- 実行 ----
++    run = Archiver(opt['quiet'], opt['dry'], opt['v'])
++    remaining = opt['limit']
++    for folder in boards:
++        lk = None
++        if not opt['dry']:
++            try:
++                lk = open(f"./{folder}/archive.lock", 'a+')
++                fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
++            except OSError:
++                if lk is not None:
++                    lk.close()
++                arch_out(f"板 {folder}: 別の archive.py が実行中のため、スキップ")
++                continue
++        plain, gz, tmps = arch_scan(folder)
++        if not opt['dry']:
++            for t in tmps:                          # 古い一時ファイル (途中で止まった圧縮の残り) の掃除
++                s = arch_stat(t)
++                if s is not None and int(time.time()) - s.mtime > ARCH_TMP_MAX_AGE:
++                    try:
++                        os.unlink(t)
++                    except OSError:
++                        pass
++                    arch_out(t.lstrip('./') + '  古い一時ファイルを削除')
++        before = dict(run.c)
++        for name in plain:
++            if name in gz:
++                run.stage2(f"./{folder}/{name}")    # 段階2 (先に。今回作る gz は、次回以降)
++        for name in plain:
++            if name in gz:
++                continue
++            if opt['limit'] > 0 and remaining <= 0:
++                run.skip(f"./{folder}/{name}", '--limit に達した')
++                continue
++            if run.stage1(f"./{folder}/{name}") and opt['limit'] > 0:
++                remaining -= 1
++        def d(k, _before=before):
++            return int(run.c[k]) - int(_before[k])
++        arch_out(f"板 {folder}: 圧縮 {d('compressed')} ({arch_mb(d('in'))} → {arch_mb(d('out'))})、"
++                 f"平文削除 {d('plain_removed')}、古い gz 削除 {d('stale_gz_removed')}、"
++                 f"gz を退避 {d('quarantined')}、NG {d('ng')}")
++        if lk is not None:
++            fcntl.flock(lk, fcntl.LOCK_UN)
++            lk.close()
++    if run.c['skip']:
++        parts = [f"{k} {v}" for k, v in run.c['skip'].items()]
++        arch_out('スキップ: ' + ', '.join(parts))
++    if opt['v']:
++        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
++        arch_out(f"メモリのピーク {peak / 1048576:.1f}MB")
++    return 1 if run.c['ng'] > 0 else 0
++
++
++if __name__ == '__main__':
++    sys.exit(main(sys.argv[1:]))
+diff --git a/config.sample.ini b/config.sample.ini
+new file mode 100644
+index 0000000..de8868c
+--- /dev/null
++++ b/config.sample.ini
+@@ -0,0 +1,41 @@
++; config.ini の見本。コピーして config.ini にして、変えたい行のコメント (先頭の ;) を外す。
++; config.ini はプログラムとして実行されない（ただのテキスト）。キー・型・範囲を検査して、外れた値は無視して既定値を使う (理由は標準エラー出力に出る)。
++; 文字列は "" で囲んでも囲まなくてもよい (< > " ' & $ \ と制御文字は使えない)。真偽は true / false。
++
++; 同じ板での連投制限 (秒) 0〜3600
++;POST_INTERVAL = 5
++; 同じ IP の新規スレッド作成の間隔 (秒) 0〜86400
++;GLOBAL_WINDOW = 180
++; これを超えた古いスレッドは o数字.html に退避 (0 なら退避しない) 0〜100000
++;MAX_THREADS = 200
++; 「次のページ」のファイルを再利用する秒数 0〜3600
++;PAGE_CACHE = 10
++
++; 入力の上限
++;MAX_POST_BYTES = 7500
++;SUBJ_MAX = 45
++;NAME_MAX = 25
++;MAIL_MAX = 50
++;COMM_MAX = 400
++;COMM_LINES_MAX = 20
++
++; 板のタイトルの後ろに付く名前 (40文字まで) と、管理者名 (1〜20文字)
++;AMEZO = ＠あめぞう
++;ADMIN = サポート
++;URLBASE = http://ame.x0.com/
++
++; 投稿の URL を、署名つきの中継ページ (jump.cgi) 経由のリンクにする。false なら直リンク
++;JUMP_ENABLED = true
++
++; X-Forwarded-For / CF-Connecting-IP を信用する接続元 (cloudflared など、手前のプロキシの IP)
++;TRUSTED_PROXIES[] = 127.0.0.1
++;TRUSTED_PROXIES[] = ::1
++; どのプロキシも信用しないなら、値を空にする
++;TRUSTED_PROXIES =
++
++; パスワードハッシュの反復回数 (新しく作るハッシュにだけ効く。既存のハッシュは、保存された回数で検証する)
++;HASH_ITERATIONS = 100000
++
++; 過去ログの圧縮 (archive.py): 退避された過去ログを、最後の書き込みからこの秒数 (0〜604800) 待ってから圧縮する。
++; 書き込みが続いているファイルを無駄に圧縮しないための工夫で、安全の保証は別の仕組みが担う。
++;ARCHIVE_QUIET_SECONDS = 600
+diff --git a/jump.py b/jump.py
+new file mode 100644
+index 0000000..dbda9a0
+--- /dev/null
++++ b/jump.py
+@@ -0,0 +1,170 @@
++#!/usr/bin/env python3
++# -*- coding: utf-8 -*-
++#
++# jump.py - 外部サイトへの中継ページ (jump.php の Python 移植。/jump.cgi も、ここに向く)
++#
++#   投稿された URL へのリンクは、このページを経由する: /jump.cgi?u=<URL (base64url)>&s=<署名>
++#   署名が合うもの (= この掲示板に実際に投稿された URL) だけを表示する。署名がなければ、
++#   このページは「どんな URL へも飛ばせる踏み台」になってしまい、フィッシングに悪用される。
++#   自動では転送しない。飛び先を文字で全部見せて、「進む」を押したときだけ外へ出る。
++#
++#   署名の照合・URL の検査・base64url の復号は amezo.py の
++#   jump_verify / url_is_valid / b64url_decode を使う (jump.php が lib.php を使うのと同じ分担)。
++
++import sys
++import os
++import re
++import secrets
++
++import amezo   # jump_verify / url_is_valid / b64url_decode / html_escape を共用
++
++# どこから実行されても、このファイルのあるフォルダを基準にする (dai.py / admin.py と同じ)
++try:
++    os.chdir(os.path.dirname(os.path.abspath(__file__)))
++except Exception:
++    pass
++
++# CGI 環境 (LANG=C 等) でも日本語を UTF-8 で出力する
++try:
++    sys.stdout.reconfigure(encoding='utf-8', newline='')
++except AttributeError:
++    pass
++
++APP_DIR = os.path.dirname(os.path.abspath(__file__))
++
++STYLE = (
++    ':root{color-scheme:light dark}body{font-family:sans-serif;max-width:40em;margin:1.5em auto;padding:0 1em;line-height:1.6}'
++    '.url{word-break:break-all;border:1px solid #888;padding:.6em .8em;margin:.8em 0;font-family:monospace}'
++    '.host{font-size:1.4em;font-weight:bold;word-break:break-all}'
++    '.btns{margin:1.2em 0}.go,.back{display:inline-block;padding:.5em 1.6em;margin-right:.8em;border:1px solid #888;border-radius:6px;'
++    'font-size:1em;text-decoration:none;cursor:pointer;background:transparent;color:inherit}.go{font-weight:bold}'
++    '.note{font-size:.9em;opacity:.85}.warn{border:1px solid #c60;padding:.4em .7em;margin:.6em 0}'
++    '.ad{margin:1.5em 0}.ad small{display:block;opacity:.7}.ad iframe{width:100%;height:260px;border:1px solid #888}'
++)
++
++
++def E(s):
++    return amezo.html_escape(str(s))
++
++
++def jump_headers(nonce):
++    return (
++        'Content-Type: text/html; charset=UTF-8\r\n'
++        'Cache-Control: no-store\r\n'
++        'X-Robots-Tag: noindex, nofollow\r\n'
++        'Referrer-Policy: no-referrer\r\n'
++        'X-Content-Type-Options: nosniff\r\n'
++        f"Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-{nonce}'; "
++        "frame-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\n"
++        '\r\n'
++    )
++
++
++def jump_page(title, body, nonce, with_back=True):
++    out = jump_headers(nonce)
++    out += (
++        '<!DOCTYPE html><html lang="ja"><head><meta charset="UTF-8">'
++        '<meta name="viewport" content="width=device-width, initial-scale=1">'
++        '<meta name="robots" content="noindex, nofollow"><meta name="referrer" content="no-referrer">'
++        f'<title>{E(title)}</title>'
++        f'<style>{STYLE}</style>'
++        f'</head><body><h2>{E(title)}</h2>{body}'
++    )
++    if with_back:
++        out += (
++            f'<script nonce="{nonce}">document.getElementById("back").addEventListener("click",function(){{'
++            'if(history.length>1){history.back();}else{window.close();}});</script>'
++        )
++    out += '</body></html>'
++    sys.stdout.write(out)
++    sys.exit(0)
++
++
++def get_params():
++    """QUERY_STRING を PHP の $_GET と同じ感覚で読む。
++    同じキーが複数あれば最後のものが勝ち、u[]=... のような配列形式は文字列ではない (None) として扱う"""
++    params = {}
++    query_string = os.environ.get('QUERY_STRING', '')
++    if query_string:
++        for pair in query_string.split('&'):
++            if not pair:
++                continue
++            if '=' in pair:
++                k, v = pair.split('=', 1)
++            else:
++                k, v = pair, ''
++            k = amezo.url_decode(k)
++            v = amezo.url_decode(v)
++            if '[' in k:                       # u[]=... は配列 (PHP の is_string チェックで弾かれる形)
++                params[k.split('[', 1)[0]] = None
++            else:
++                params[k] = v
++    return params
++
++
++def get_string(params, key):
++    v = params.get(key)
++    return v if isinstance(v, str) else ''
++
++
++def parse_host(url):
++    """PHP の parse_url($url, PHP_URL_HOST) に当たる部分を取り出す。読めなければ None"""
++    rest = url.split('://', 1)[1] if '://' in url else ''
++    authority = re.split(r'[/?#]', rest, maxsplit=1)[0]
++    authority = authority.rsplit('@', 1)[-1]          # ユーザー情報は捨てる
++    if authority.startswith('['):                     # IPv6 は ] まで (括弧も含めて返す)
++        end = authority.find(']')
++        host = authority[:end + 1] if end != -1 else authority
++    else:
++        host = authority.split(':', 1)[0]             # ポートは捨てる
++    return host or None
++
++
++def main():
++    nonce = secrets.token_hex(12)                     # bin2hex(random_bytes(12)) と同じ24桁の16進数
++    params = get_params()
++    u = get_string(params, 'u')
++    s = get_string(params, 's')
++
++    raw = amezo.b64url_decode(u) if len(u) <= 3000 else None
++    url = None
++    if raw is not None:
++        try:
++            url = raw.decode('utf-8')
++        except UnicodeDecodeError:
++            url = None                                # URL として読めないバイト列は、表示もしない (PHP の url_is_valid で落ちるのと同じ)
++
++    if url is None or not amezo.jump_verify(url, s):
++        # 署名が合わない: リンクにはしない。URL として読めるなら、文字だけ見せる (自分で確かめてから開けるように)
++        body = ('<p>このリンクは、署名が合わないため、自動では開きません。<br>'
++                '掲示板に投稿された URL ではないか、投稿のあとに署名の鍵が変わった可能性があります。</p>')
++        if url is not None and amezo.url_is_valid(url):
++            body += ('<p class="note">URL (リンクにはしていません。確かめてから、自分で開いてください):</p>'
++                     f'<div class="url">{E(url)}</div>')
++        body += '<div class="btns"><button type="button" class="back" id="back">戻る</button></div>'
++        jump_page('このリンクは使えません', body, nonce)
++
++    host = parse_host(url) or '(ホスト名を読み取れません)'
++
++    body = ('<p>この掲示板に投稿された、外部サイトへのリンクです。移動先を確かめてから、「進む」を押してください。</p>'
++            f'<p class="note">移動先のサイト</p><div class="host">{E(host)}</div>'
++            f'<p class="note">URL 全体</p><div class="url">{E(url)}</div>')
++    if 'xn--' in host.lower():
++        body += ('<div class="warn">ドメイン名に <code>xn--</code> が含まれています。'
++                 '見た目が似た別のサイトのことがあるので、特に注意してください。</div>')
++    body += (f'<div class="btns"><a class="go" href="{E(url)}" rel="noopener noreferrer nofollow" referrerpolicy="no-referrer">進む</a>'
++             '<button type="button" class="back" id="back">戻る</button></div>'
++             '<p class="note">このページは自動では転送しません。リンク先の内容について、掲示板は責任を負いません。</p>')
++    # 広告枠: ad.html があるときだけ。別オリジン扱い (allow-same-origin なし) の iframe に入れて、掲示板のデータに触れさせない
++    if os.path.isfile(os.path.join(APP_DIR, 'ad.html')):
++        body += ('<div class="ad"><small>広告</small>'
++                 '<iframe src="ad.html" sandbox="allow-scripts allow-popups" referrerpolicy="no-referrer" loading="lazy" title="広告"></iframe></div>')
++    jump_page('外部サイトへ移動します', body, nonce)
++
++
++if __name__ == '__main__':
++    try:
++        main()
++    except Exception as e:                            # jump.php が RuntimeException を受けて 500 にするのと同じ
++        print(f'jump: {e}', file=sys.stderr)
++        sys.stdout.write('Status: 500\r\n\r\nサーバーの設定に問題があります。')
+diff --git a/run.sh b/run.sh
+new file mode 100755
+index 0000000..0802a77
+--- /dev/null
++++ b/run.sh
+@@ -0,0 +1,14 @@
++#!/bin/sh
++# 使い方: sh run.sh   (PORT=8000 で変えられる)
++cd "$(dirname "$0")" || exit 1
++# blist.txt の板フォルダを作る。index.html が無ければ転送ページを置く
++cut -d, -f1 blist.txt | while read -r b; do
++  [ -z "$b" ] && continue
++  mkdir -p "$b"
++  if [ ! -f "$b/index.html" ]; then
++    printf '<html><head><meta http-equiv="refresh" content="0;url=../amezo.cgi?folder=%s"></head></html>\n' "$b" > "$b/index.html"
++    touch -d '1 hour ago' "$b/index.html"      # 「直近に更新済み」と判定されて再生成されない (転送ループ) のを避ける
++  fi
++done
++echo "http://127.0.0.1:${PORT:-8000}/"
++exec python3 setup_expose.py --no-tunnel --port "${PORT:-8000}"
+diff --git a/setup_expose.py b/setup_expose.py
+index 14c5cf5..505bb92 100644
+--- a/setup_expose.py
++++ b/setup_expose.py
+@@ -6,11 +6,19 @@
+ #   - /amezo.cgi と /amezo.py はどちらも amezo.py を実行する
+ #     (フォームの action="../amezo.cgi" のまま動く。古い Perl 版 .cgi は実行されない)
+ #   - 静的ファイルは「許可リスト方式」で配信する。許可するのは次のものだけ:
+-#       /  /index.html  /style.css  /hide.js
++#       /  /index.html  /style.css  /hide.js  /ad.html
+ #       blist.txt に載っている板フォルダの index.html / index2.html / 数字.html
+ #     delpass.txt, global.mem, ng.txt, x〜.html (非表示スレッド), ソースなどは 404 になる
+-
++#   - 許可リスト判定の前に、不正な形のパス ('//' '%' '\' NUL '..' '.' の区間、'/' で始まらない形) は 400 で止める
++#     (PHP 版 router.php と同じ。判定はデコードする前の生のパスで行う)
++#   - 圧縮済みの過去ログ (o数字.html.gz) は、o数字.html の URL のまま配信する (中身は router.php の serve_archived と同じ)
++
++import argparse
++import fcntl
++import gzip
++import hashlib
+ import os
++import secrets
+ import shutil
+ import time
+ import subprocess
+@@ -18,7 +26,9 @@ import threading
+ import sys
+ import re
+ import socket
++import urllib.error
+ import urllib.parse
++import urllib.request
+ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+ 
+ PORT = 8000
+@@ -26,12 +36,35 @@ PORT = 8000
+ # POST ボディの上限 (amezo.py 側の上限は 7500 バイト)
+ MAX_POST_BYTES = 64 * 1024
+ 
++# --make-hash の形式 (amezo.py の make_hash と同じ: pbkdf2_sha256$回数$salt$hash)
++HASH_ITERATIONS = 100000
++
++
++def make_hash(password, iterations=HASH_ITERATIONS):
++    """amezo.py の make_hash() と同じ形式。amezo.py を import せずに作れる"""
++    salt = secrets.token_bytes(16)
++    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
++    return f"pbkdf2_sha256${iterations}${salt.hex()}${dk.hex()}"
++
++
++def write_delpass(password):
++    if not password:
++        print("❌ 合言葉が空です。")
++        return False
++    fd = os.open("delpass.txt", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
++    os.fchmod(fd, 0o600)          # 既存ファイルがある場合も 0600 にそろえる
++    with os.fdopen(fd, "w", encoding="utf-8") as f:
++        f.write(make_hash(password) + "\n")
++    print("✅ delpass.txt を作りました。管理画面は /admin.cgi です。")
++    return True
++
++
+ # CGI として実行するスクリプト名 (拡張子なし)。None なら ./ 内の .cgi/.py を全て実行する
+ # (None だと /server.py のような URL でサーバー自身が再起動されるので注意)
+-ALLOWED_CGI = {"amezo", "dai", "admin"}
++ALLOWED_CGI = {"amezo", "dai", "admin", "jump"}
+ 
+ # 板フォルダの外で配信を許可するパス
+-STATIC_ROOT_FILES = {"/", "/index.html", "/style.css", "/hide.js"}
++STATIC_ROOT_FILES = {"/", "/index.html", "/style.css", "/hide.js", "/ad.html"}
+ 
+ # 板フォルダの中で配信を許可するファイル名
+ # (o数字.html は退避した過去ログ、kako.html はその一覧。x〜.html は含まない)
+@@ -54,6 +87,35 @@ def load_boards():
+     return boards
+ 
+ 
++def check_flock():
++    """このディレクトリで flock が効くか確かめる (Google Drive のマウント上では効かないことがある。PHP 版と同じ方式)"""
++    path = os.path.join(os.getcwd(), ".flock_test")
++    fd1 = fd2 = None
++    try:
++        fd1 = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
++        fd2 = os.open(path, os.O_RDWR)
++        fcntl.flock(fd1, fcntl.LOCK_EX)
++        try:
++            fcntl.flock(fd2, fcntl.LOCK_EX | fcntl.LOCK_NB)
++            effective = False
++        except OSError:
++            effective = True
++    except OSError as e:
++        print(f"  ⚠️ ロックの確認ができませんでした: {e}")
++        return
++    finally:
++        for fd in (fd1, fd2):
++            if fd is not None:
++                os.close(fd)
++        try:
++            os.unlink(path)
++        except OSError:
++            pass
++    if not effective:
++        print("  ⚠️ このディレクトリでは flock が効いていません (Google Drive 上など)。")
++        print("     同時に投稿されるとファイルが壊れるおそれがあります。/content などのローカルディスクに置いてください。")
++
++
+ # 1. BBSの初期ディレクトリ・パーミッション設定
+ def setup_bbs_directories():
+     print("📂 BBS用のディレクトリとパーミッションを設定しています...")
+@@ -77,7 +139,10 @@ def setup_bbs_directories():
+ 
+     if not os.path.exists("delpass.txt"):
+         print("  ℹ️ delpass.txt がありません。削除機能を使うなら次で作成してください:")
+-        print("     !python3 amezo.py --make-hash 合言葉 > delpass.txt")
++        print("     !python3 setup_expose.py --make-hash 合言葉")
++        print("     (または: !python3 amezo.py --make-hash 合言葉 > delpass.txt)")
++
++    check_flock()
+ 
+     # blist.txt に定義されている板用フォルダを作成
+     boards = sorted(load_boards()) if os.path.exists("blist.txt") else DEFAULT_BOARDS
+@@ -111,17 +176,119 @@ def cleanup_old_processes(port=PORT):
+     time.sleep(2)
+ 
+ 
++# ---- パスの形の検査 (PHP 版 router.php と同じ) --------------------------------
++# REQUEST のパス ('?' より前) を、デコードする前の生のまま使う。
++# '//' '%' '\' NUL '..' '.' の区間、'/' で始まらない形 (http://… の絶対形式) は 400 で止める。
++_DOT_SEGMENT_RE = re.compile(r'(?:^|/)\.(?:/|$)')
++
++
++def is_malformed_path(raw_path):
++    if raw_path == "" or not raw_path.startswith("/"):
++        return True
++    if "//" in raw_path or "%" in raw_path or "\\" in raw_path or "\x00" in raw_path or ".." in raw_path:
++        return True
++    return bool(_DOT_SEGMENT_RE.search(raw_path))
++
++
++def accepts_gzip(header):
++    """Accept-Encoding が gzip を受け付けるか (gzip;q=0 は受け付けない。router.php の accepts_gzip と同じ)"""
++    for tok in (header or "").split(","):
++        parts = [p.strip() for p in tok.split(";")]
++        if parts[0].lower() not in ("gzip", "x-gzip"):
++            continue
++        q = 1.0
++        for p in parts[1:]:
++            m = re.fullmatch(r'q=([0-9.]+)', p, re.IGNORECASE)
++            if m:
++                q = float(m.group(1))
++        return q > 0
++    return False
++
++
+ # 2. PythonによるCGI対応Webサーバー
+ class MyCGIHandler(SimpleHTTPRequestHandler):
++    verbose = False                   # --verbose のとき True (要求行も出す)
++
++    # ---- 生のパスの取り出しと、不正な形の拒否 ----
++    def raw_path(self):
++        """要求行からそのまま取り出したパス ('?' より前、デコードしない)。
++        http.server は self.path の '//' を正規化してしまうことがあるので、要求行を正とする"""
++        try:
++            parts = self.raw_requestline.decode("iso-8859-1").split()
++            target = parts[1] if len(parts) >= 2 else self.path
++        except Exception:
++            target = self.path
++        return target.split("?", 1)[0]
++
++    def reject_if_malformed(self):
++        """不正な形のパスなら 400 を返して True (処理を止める)"""
++        if self.verbose:
++            print(f"  {self.command} {self.path}")
++        if is_malformed_path(self.raw_path()):
++            self.send_error(400, "Bad Request")
++            return True
++        return False
++
++    # ---- 圧縮済みの過去ログ (o数字.html.gz) の配信 ----
++    def archived_gz_path(self):
++        """この要求が /板/o数字.html で、配信すべき .gz があればそのパス。無ければ None。
++        平文があって更新日時が違うときは gz が古いので None (平文を従来どおり配信する)"""
++        m = re.fullmatch(r'/([^/]+)/(o\d+\.html)', self.raw_path())
++        if not m or m.group(1) not in load_boards():
++            return None
++        plain = os.path.join(m.group(1), m.group(2))
++        gz = plain + ".gz"
++        if not os.path.isfile(gz):
++            return None
++        if os.path.isfile(plain) and int(os.path.getmtime(plain)) != int(os.path.getmtime(gz)):
++            return None
++        return gz
++
++    def serve_archived(self, gz, head_only=False):
++        """o数字.html.gz を、o数字.html の URL のまま返す (router.php の serve_archived と同じ)。
++        gzip を受け付ける相手には圧縮のまま、受け付けない相手には展開して返す (zlib 相当の gzip は常に使えるので 406 は無い)"""
++        self.send_response(200)
++        self.send_header("Content-Type", "text/html; charset=UTF-8")
++        self.send_header("Vary", "Accept-Encoding")
++        self.send_header("X-Content-Type-Options", "nosniff")
++        self.send_header("Cache-Control", "public, max-age=3600")
++        if accepts_gzip(self.headers.get("Accept-Encoding", "")):
++            self.send_header("Content-Encoding", "gzip")
++            self.send_header("Content-Length", str(os.path.getsize(gz)))
++            self.end_headers()
++            if not head_only:
++                with open(gz, "rb") as f:
++                    shutil.copyfileobj(f, self.wfile, 64 * 1024)
++        else:
++            self.end_headers()
++            if not head_only:
++                with gzip.open(gz, "rb") as f:
++                    shutil.copyfileobj(f, self.wfile, 64 * 1024)
+ 
+     # ---- ルーティング ----
+     def do_GET(self):
+-        if self.is_cgi_request():
++        if self.reject_if_malformed():
++            return
++        gz = self.archived_gz_path()
++        if gz is not None:
++            self.serve_archived(gz)
++        elif self.is_cgi_request():
+             self.run_custom_python_cgi()
+         else:
+             super().do_GET()          # 静的ファイル (send_head で許可リスト判定)
+ 
++    def do_HEAD(self):
++        if self.reject_if_malformed():
++            return
++        gz = self.archived_gz_path()
++        if gz is not None:
++            self.serve_archived(gz, head_only=True)
++        else:
++            super().do_HEAD()         # send_head で許可リスト判定 (従来どおり)
++
+     def do_POST(self):
++        if self.reject_if_malformed():
++            return
+         if self.is_cgi_request():
+             self.run_custom_python_cgi()
+         else:
+@@ -305,6 +472,36 @@ def wait_for_server(port=PORT, timeout=10):
+     return False
+ 
+ 
++def http_status(port, path):
++    try:
++        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=10) as r:
++            return r.status
++    except urllib.error.HTTPError as e:
++        return e.code
++    except OSError:
++        return 0
++
++
++def self_check(port):
++    """起動直後の確認: 板一覧や中継は出る / 鍵やパスワードやソースは配られない (PHP 版と同じ。失敗しても起動は続ける)"""
++    print("🔎 起動チェック:")
++    good = True
++    for path, want in [("/dai.cgi", 200), ("/jump.cgi", 200), ("/style.css", 200), ("/hide.js", 200),
++                       ("//amezo.py", 400), ("/setup_expose.py", 404),
++                       ("/trip_secret.txt", 404), ("/id_secret.txt", 404), ("/delpass.txt", 404),
++                       ("/cap.txt", 404), ("/blist.txt", 404), ("/config.ini", 404),
++                       ("/key_secret.txt", 404), ("/jump_secret.txt", 404), ("/ng.txt", 404),
++                       ("/archive.py", 404), ("//archive.py", 400)]:
++        got = http_status(port, path)
++        mark = "✅" if got == want else "❌"
++        if got != want:
++            good = False
++        print(f"  {mark} {path} -> {got}" + ("" if got == want else f" (期待: {want})"))
++    if not good:
++        print("  ⚠️ 期待と違う結果があります。公開する前に setup_expose.py の配信判定を確認してください。")
++    return good
++
++
+ # 3. トンネルによる外部公開
+ def start_tunnel(port=PORT):
+     print("☁️ Cloudflare Tunnel をセットアップしています...")
+@@ -351,7 +548,14 @@ def start_tunnel(port=PORT):
+     return tunnel_process
+ 
+ 
+-if __name__ == "__main__":
++def main():
++    ap = argparse.ArgumentParser(description="あめぞう風掲示板 Python 版の起動スクリプト")
++    ap.add_argument("--make-hash", metavar="PASSWORD", help="管理用パスワードを delpass.txt に作って終了する (amezo.make_hash と同じ形式、0600)")
++    ap.add_argument("--no-tunnel", action="store_true", help="トンネルを張らず、ローカルだけで起動する")
++    ap.add_argument("--port", type=int, default=PORT, help=f"ポート (既定: {PORT})")
++    ap.add_argument("--verbose", action="store_true", help="要求行も全部出す")
++    args = ap.parse_args()
++
+     # __file__ が無い環境 (Jupyter/Colab) では os.getcwd() を使う
+     try:
+         BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+@@ -360,27 +564,45 @@ if __name__ == "__main__":
+ 
+     os.chdir(BASE_DIR)
+ 
+-    cleanup_old_processes()
++    if args.make_hash is not None:
++        return 0 if write_delpass(args.make_hash) else 1
++
++    MyCGIHandler.verbose = args.verbose
++
++    cleanup_old_processes(port=args.port)
+     setup_bbs_directories()
+ 
+-    server = run_cgi_server(port=PORT)
++    server = run_cgi_server(port=args.port)
+ 
+-    if wait_for_server(port=PORT):
+-        tunnel_proc = start_tunnel(port=PORT)
++    if not wait_for_server(port=args.port):
++        print("❌ Webサーバーが起動しませんでした。")
++        server.shutdown()
++        return 1
+ 
+-        try:
+-            print("\n⏳ サーバー稼働中... 停止するには Ctrl+C を押してください。")
+-            while True:
+-                if tunnel_proc.poll() is not None:
+-                    print("⚠️ トンネルプロセスが終了しました。")
+-                    break
+-                time.sleep(5)
+-        except KeyboardInterrupt:
+-            print("\n🛑 終了シグナルを検知しました。プロセスを停止します...")
+-        finally:
+-            tunnel_proc.terminate()
+-            server.shutdown()
+-            print("✅ プロセスを安全に停止しました。")
++    self_check(args.port)
++
++    tunnel_proc = None
++    if args.no_tunnel:
++        print(f"\n🏠 ローカルで起動しました: http://127.0.0.1:{args.port}/\n")
+     else:
+-        print("❌ Webサーバーが起動しませんでした。")
++        tunnel_proc = start_tunnel(port=args.port)
++
++    try:
++        print("\n⏳ サーバー稼働中... 停止するには Ctrl+C を押してください。")
++        while True:
++            if tunnel_proc is not None and tunnel_proc.poll() is not None:
++                print("⚠️ トンネルプロセスが終了しました。")
++                break
++            time.sleep(5)
++    except KeyboardInterrupt:
++        print("\n🛑 終了シグナルを検知しました。プロセスを停止します...")
++    finally:
++        if tunnel_proc is not None:
++            tunnel_proc.terminate()
+         server.shutdown()
++        print("✅ プロセスを安全に停止しました。")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/tests/archive_test.py b/tests/archive_test.py
+new file mode 100644
+index 0000000..588d57b
+--- /dev/null
++++ b/tests/archive_test.py
+@@ -0,0 +1,86 @@
++# -*- coding: utf-8 -*-
++# archive.py (過去ログの gzip 圧縮) のテスト (PHP 版 tests/archive_test.py / archive_cli_test.py 相当)。
++# 一時フォルダにコピーして実行する。実行: python3 tests/archive_test.py
++import gzip
++import os
++import shutil
++import subprocess
++import sys
++import time
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++ng = 0
++ok = 0
++
++
++def chk(name, cond, extra=''):
++    global ng, ok
++    if cond:
++        ok += 1
++        print(f'OK {name}')
++    else:
++        ng += 1
++        print(f'NG {name} {extra}')
++
++
++d = tempfile_dir = None
++import tempfile  # noqa: E402
++d = tempfile.mkdtemp(prefix='amezo_arch_')
++for f in ('archive.py', 'amezo.py'):
++    shutil.copy(os.path.join(ROOT, f), os.path.join(d, f))
++os.makedirs(os.path.join(d, 'main'))
++with open(os.path.join(d, 'blist.txt'), 'w', encoding='utf-8') as f:
++    f.write('main,#ddeedd,広場\n')
++
++BODY = ('<html><head><title>題名 </title></head><body><dl><dt>1 投稿者：<b>名無し </b><br>'
++        '<dd>本文です。圧縮テスト。 </dl>\n</body></html>\n')
++plain = os.path.join(d, 'main', 'o260101000000.html')
++gz = plain + '.gz'
++with open(plain, 'w', encoding='utf-8') as f:
++    f.write(BODY)
++old = time.time() - 7200
++os.utime(plain, (old, old))
++
++
++def run(*args):
++    return subprocess.run([sys.executable, 'archive.py', *args], cwd=d, capture_output=True, text=True)
++
++
++r = run('--selftest', 'main')
++chk('selftest が通る', r.returncode == 0 and 'NG' not in r.stdout, r.stdout[-200:])
++
++r = run('main', '--quiet=0', '--dry-run')
++chk('dry-run は何も書かない', r.returncode == 0 and not os.path.exists(gz))
++
++r = run('main', '--quiet=0')
++chk('段階1: gz ができ、平文は残る', r.returncode == 0 and os.path.exists(gz) and os.path.exists(plain), r.stdout)
++chk('段階1: gz の中身が一致', gzip.open(gz, 'rt', encoding='utf-8').read() == BODY)
++chk('段階1: gz の更新日時は平文と同じ', int(os.path.getmtime(gz)) == int(old))
++
++r = run('main', '--quiet=0')
++chk('段階2: 平文が消えて gz だけ残る', r.returncode == 0 and not os.path.exists(plain) and os.path.exists(gz), r.stdout)
++
++r = run('--restore', 'main', 'o260101000000')
++chk('restore: 平文が戻る', r.returncode == 0 and os.path.exists(plain)
++    and open(plain, encoding='utf-8').read() == BODY and os.path.exists(gz), r.stdout + r.stderr)
++r = run('--restore', 'main', 'o260101000000')
++chk('restore: すでにある場合は上書きしない (exit 2)', r.returncode == 2, str(r.returncode))
++
++# 壊れた gz: 中身が平文と違うと .bad に退避して NG (exit 1)、平文は消さない
++os.unlink(gz)
++with gzip.open(gz, 'wb') as f:
++    f.write('ぜんぜん違う中身'.encode())
++os.utime(gz, (old, old))
++os.utime(plain, (old, old))
++r = run('main', '--quiet=0')
++chk('壊れた gz は .bad に退避し exit 1', r.returncode == 1 and os.path.exists(gz + '.bad') and os.path.exists(plain),
++    f'{r.returncode} {r.stdout}')
++
++r = run('main', '--quiet=999999999')
++chk('範囲外の --quiet は exit 2', r.returncode == 2, str(r.returncode))
++r = run('nosuchboard', '--quiet=0')
++chk('無い板は exit 2', r.returncode == 2, str(r.returncode))
++
++shutil.rmtree(d, ignore_errors=True)
++print(f'== OK {ok} / NG {ng}')
++sys.exit(1 if ng else 0)
+diff --git a/tests/config_test.py b/tests/config_test.py
+new file mode 100644
+index 0000000..2405046
+--- /dev/null
++++ b/tests/config_test.py
+@@ -0,0 +1,59 @@
++# -*- coding: utf-8 -*-
++# config.ini が amezo.py の設定値に効くことのテスト (PHP 版 tests/config_test.py 相当)。
++# 一時フォルダに amezo.py をコピーし、config.ini を置いて読み込ませ、値を取り出す。
++# 実行: python3 tests/config_test.py
++import json
++import os
++import shutil
++import subprocess
++import sys
++import tempfile
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++ng = 0
++ok = 0
++
++
++def chk(name, cond, extra=''):
++    global ng, ok
++    if cond:
++        ok += 1
++        print(f'OK {name}')
++    else:
++        ng += 1
++        print(f'NG {name} {extra}')
++
++
++def run(files):
++    d = tempfile.mkdtemp(prefix='amezo_cfg_')
++    shutil.copy(os.path.join(ROOT, 'amezo.py'), os.path.join(d, 'amezo.py'))
++    for name, content in files.items():
++        with open(os.path.join(d, name), 'w', encoding='utf-8') as f:
++            f.write(content)
++    code = ('import json, amezo; print(json.dumps([amezo.POST_INTERVAL, amezo.MAX_THREADS, '
++            'amezo.JUMP_ENABLED, amezo.AMEZO, amezo.ADMIN, amezo.TRUSTED_PROXIES, '
++            'amezo.GLOBAL_WINDOW, amezo.ARCHIVE_QUIET_SECONDS]))')
++    r = subprocess.run([sys.executable, '-c', code], cwd=d, capture_output=True, text=True)
++    shutil.rmtree(d, ignore_errors=True)
++    if r.returncode != 0:
++        return None, r.stderr
++    return json.loads(r.stdout.strip().splitlines()[-1]), r.stderr
++
++
++v, err = run({})
++chk('config.ini が無ければ既定値', v == [5, 200, True, '＠あめぞう', 'サポート', ['127.0.0.1', '::1'], 180, 600], str(v))
++
++v, err = run({'config.ini': 'POST_INTERVAL = 0\nMAX_THREADS = 3\nJUMP_ENABLED = false\n'
++                            'AMEZO = ＠テスト\nADMIN = 管理人\nTRUSTED_PROXIES[] = 10.0.0.1\n'
++                            'GLOBAL_WINDOW = 0\nARCHIVE_QUIET_SECONDS = 60\n'})
++chk('config.ini の値が効く', v == [0, 3, False, '＠テスト', '管理人', ['10.0.0.1'], 0, 60], str(v))
++
++v, err = run({'config.ini': 'POST_INTERVAL = 99999\nMAX_THREADS = 3\n'})
++chk('範囲外の値は無視され既定値、理由が標準エラーに出る',
++    v is not None and v[0] == 5 and v[1] == 3 and 'POST_INTERVAL' in err, f'{v} / {err}')
++
++v, err = run({'config.ini': 'POST_INTERVAL = 3\n[bad\n'})
++chk('構文エラーなら config.ini 全体を使わない', v is not None and v[0] == 5 and '読み込めません' in err, f'{v} / {err}')
++
++print(f'== OK {ok} / NG {ng}')
++sys.exit(1 if ng else 0)
+diff --git a/tests/port_test.py b/tests/port_test.py
+new file mode 100644
+index 0000000..191b19a
+--- /dev/null
++++ b/tests/port_test.py
+@@ -0,0 +1,167 @@
++# -*- coding: utf-8 -*-
++# 移植した機能の結合テスト: サーバーを立てて、投稿・中継 (jump)・鍵つきスレッド・
++# 管理画面・配信の 400/404・ページ送り・過去ログの gz 配信までを通しで確認する。
++# 一時フォルダにコピーして実行する (元のフォルダは汚さない)。
++# 実行: python3 tests/port_test.py
++import gzip
++import os
++import re
++import shutil
++import socket
++import subprocess
++import sys
++import tempfile
++import time
++import urllib.error
++import urllib.parse
++import urllib.request
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++ng = 0
++ok = 0
++
++
++def chk(name, cond, extra=''):
++    global ng, ok
++    if cond:
++        ok += 1
++        print(f'OK {name}')
++    else:
++        ng += 1
++        print(f'NG {name} {extra}')
++
++
++d = tempfile.mkdtemp(prefix='amezo_port_')
++shutil.copytree(ROOT, d, dirs_exist_ok=True,
++                ignore=shutil.ignore_patterns('.git', '__pycache__', 'tests', '*.patch', 'sapo-script.zip'))
++with open(os.path.join(d, 'config.ini'), 'w', encoding='utf-8') as f:
++    f.write('POST_INTERVAL = 0\nGLOBAL_WINDOW = 0\n')
++r = subprocess.run([sys.executable, '-c', "import amezo; print(amezo.make_hash('adminpw'))"],
++                   cwd=d, capture_output=True, text=True)
++with open(os.path.join(d, 'delpass.txt'), 'w', encoding='utf-8') as f:
++    f.write(r.stdout.strip())
++for b in ('main', 'zatsu', 'test'):
++    os.makedirs(os.path.join(d, b), exist_ok=True)
++
++with socket.socket() as s:
++    s.bind(('127.0.0.1', 0))
++    port = s.getsockname()[1]
++BASE = f'http://127.0.0.1:{port}'
++srv = subprocess.Popen([sys.executable, 'setup_expose.py', '--no-tunnel', '--port', str(port)],
++                       cwd=d, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++
++
++def req(path, data=None, headers=None):
++    rq = urllib.request.Request(BASE + path, data=data, headers=headers or {})
++    try:
++        with urllib.request.urlopen(rq, timeout=15) as resp:
++            return resp.status, dict(resp.headers), resp.read()
++    except urllib.error.HTTPError as e:
++        return e.code, dict(e.headers), e.read()
++
++
++def post(path, fields):
++    return req(path, data=urllib.parse.urlencode(fields).encode())
++
++
++try:
++    for _ in range(60):
++        try:
++            if req('/style.css')[0] == 200:
++                break
++        except Exception:
++            pass
++        time.sleep(0.5)
++    else:
++        print('NG サーバーが起動しない')
++        sys.exit(1)
++
++    # ---- 投稿と中継リンク ----
++    st, hd, body = post('/amezo.cgi', {'folder': 'main', 'name': '名無し', 'subj': 'テストスレ',
++                                       'comm': '見て https://example.com/?a=1&b=2 ね'})
++    chk('新規投稿できる', st in (200, 303), str(st))
++    files = [f for f in os.listdir(os.path.join(d, 'main')) if re.fullmatch(r'\d+\.html', f)]
++    chk('スレッドファイルができた', len(files) == 1, str(files))
++    res = files[0][:-5]
++    html = open(os.path.join(d, 'main', files[0]), encoding='utf-8').read()
++    chk('本文が jump リンク化', '../jump.cgi?u=' in html)
++    chk('表示文字は元の URL', '>https://example.com/?a=1&amp;b=2</a>' in html)
++    m = re.search(r'href="\.\./jump\.cgi\?u=([^&]+)&amp;s=([^"]+)"', html)
++    u, s = m.group(1), m.group(2)
++
++    st, hd, body = req(f'/jump.cgi?u={u}&s={s}')
++    t = body.decode('utf-8')
++    chk('jump: 正しい署名で進むリンク', st == 200 and '進む' in t and 'example.com' in t)
++    chk('jump: Cache-Control no-store', hd.get('Cache-Control') == 'no-store')
++    st, hd, body = req(f'/jump.cgi?u={u}&s={"A" * 22}')
++    t = body.decode('utf-8')
++    chk('jump: 改ざんではリンクを出さない', 'href="https://example.com' not in t)
++    chk('jump: 改ざんでも URL は文字で出る', 'https://example.com/?a=1&amp;b=2' in t)
++
++    # ---- 鍵つきスレッド ----
++    post('/admin.cgi', {'adminpass': 'adminpw', 'act': 'lock', 'folder': 'main', 'res': res})
++    chk('admin: 鍵をかけると .lock ができる', os.path.exists(os.path.join(d, 'main', res + '.lock')))
++    st, hd, body = post('/admin.cgi', {'adminpass': 'adminpw', 'act': 'issue', 'folder': 'main',
++                                       'res': res, 'label': 'テスト', 'scope': 'thread'})
++    km = re.search(r'([A-Z2-7]{4}(?:-[A-Z2-7]{4}){5})', body.decode('utf-8'))
++    chk('admin: 発行キーが1回だけ表示される', km is not None)
++    key = km.group(1)
++    st, hd, body = post('/amezo.cgi', {'folder': 'main', 'name': '名無し', 'res': res, 'comm': '鍵なし'})
++    chk('鍵なし返信はエラー', '認証キーが必要です' in body.decode('utf-8'))
++    st, hd, body = post('/amezo.cgi', {'folder': 'main', 'name': '名無し', 'res': res, 'comm': '鍵ちがい',
++                                       'key': 'AAAA-AAAA-AAAA-AAAA-AAAA-AAAA'})
++    chk('間違った鍵はエラー', '認証キーが正しくありません' in body.decode('utf-8'))
++    post('/amezo.cgi', {'folder': 'main', 'name': '名無し', 'res': res, 'comm': '鍵つき返信おk', 'key': key})
++    html = open(os.path.join(d, 'main', files[0]), encoding='utf-8').read()
++    chk('正しい鍵で返信できる', '鍵つき返信おk' in html)
++    chk('返信後もフォームに鍵欄がある', 'name="key"' in html)
++
++    post('/admin.cgi', {'adminpass': 'wrongpw', 'act': 'boards'})
++    fm = ''
++    fp = os.path.join(d, 'admin_fail.mem')
++    if os.path.exists(fp):
++        fm = open(fp).read()
++    chk('admin: 失敗記録に生 IP が残らない', fm.strip() != '' and '127.0.0.1' not in fm, fm[:80])
++
++    # ---- 配信の 400 / 404 ----
++    chk('// は 400', req('//amezo.py')[0] == 400)
++    chk('.. は 400', req('/main/../amezo.py')[0] == 400)
++    chk('config.ini は 404', req('/config.ini')[0] == 404)
++    chk('archive.py は 404', req('/archive.py')[0] == 404)
++    chk('.gz 直アクセスは 404', req('/main/o1.html.gz')[0] == 404)
++
++    # ---- ページ送り ----
++    chk('page=99 は最後のページに寄る', req('/amezo.cgi?folder=main&page=99')[0] in (200, 303))
++    post('/amezo.cgi', {'folder': 'main', 'name': '名無し', 'subj': '明示page1', 'comm': 'x', 'page': '1'})
++    files2 = [f for f in os.listdir(os.path.join(d, 'main')) if re.fullmatch(r'\d+\.html', f)]
++    chk('明示 page=1 でも投稿できる', len(files2) == 2, str(files2))
++
++    # ---- 過去ログの圧縮と gz 配信 ----
++    src = os.path.join(d, 'main', files[0])
++    arc = os.path.join(d, 'main', 'o260101000000.html')
++    shutil.copy(src, arc)
++    old = time.time() - 7200
++    os.utime(arc, (old, old))
++    subprocess.run([sys.executable, 'archive.py', 'main', '--quiet=0'], cwd=d, capture_output=True, text=True)
++    subprocess.run([sys.executable, 'archive.py', 'main', '--quiet=0'], cwd=d, capture_output=True, text=True)
++    chk('archive: 2回の実行で平文が消えて gz だけ残る',
++        not os.path.exists(arc) and os.path.exists(arc + '.gz'))
++    st, hd, body = req('/main/o260101000000.html')
++    chk('gz 配信: 圧縮非対応には平文で 200', st == 200 and hd.get('Content-Encoding') is None and b'</html>' in body)
++    chk('gz 配信: Vary と Cache-Control', hd.get('Vary') == 'Accept-Encoding'
++        and hd.get('Cache-Control') == 'public, max-age=3600', str(hd))
++    st, hd, body = req('/main/o260101000000.html', headers={'Accept-Encoding': 'gzip'})
++    chk('gz 配信: 対応ブラウザには gz のまま', st == 200 and hd.get('Content-Encoding') == 'gzip'
++        and b'</html>' in gzip.decompress(body))
++    st, hd, body = req('/main/o260101000000.html', headers={'Accept-Encoding': 'gzip;q=0'})
++    chk('gz 配信: q=0 なら平文', st == 200 and hd.get('Content-Encoding') is None)
++finally:
++    srv.terminate()
++    try:
++        srv.wait(timeout=10)
++    except Exception:
++        srv.kill()
++    shutil.rmtree(d, ignore_errors=True)
++
++print(f'== OK {ok} / NG {ng}')
++sys.exit(1 if ng else 0)
+diff --git a/tests/unit_test.py b/tests/unit_test.py
+new file mode 100644
+index 0000000..b3028dc
+--- /dev/null
++++ b/tests/unit_test.py
+@@ -0,0 +1,170 @@
++# -*- coding: utf-8 -*-
++# amezo.py の関数レベルのテスト (PHP 版 tests/unit.php の config / 中継リンク / 鍵 相当)。
++# 実行: python3 tests/unit_test.py   (OK/NG を数えて、NG があれば exit 1)
++import os
++import re
++import sys
++import tempfile
++
++import shutil  # noqa: E402
++
++_work = tempfile.mkdtemp(prefix='amezo_unit_')
++_src = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'amezo.py')
++shutil.copy(_src, os.path.join(_work, 'amezo.py'))   # amezo.py は自分のフォルダに chdir するので、コピーして読み込む
++sys.path.insert(0, _work)
++os.chdir(_work)
++import amezo  # noqa: E402
++
++ng = 0
++ok = 0
++
++
++def chk(name, got, want):
++    global ng, ok
++    if got == want:
++        ok += 1
++        print(f'OK {name}')
++    else:
++        ng += 1
++        print(f'NG {name}: got={got!r} want={want!r}')
++
++
++# ---- config.ini ----
++def loadcfg(ini):
++    fd, path = tempfile.mkstemp()
++    os.write(fd, ini.encode())
++    os.close(fd)
++    try:
++        return amezo.config_load(path)
++    finally:
++        os.unlink(path)
++
++
++v, e = loadcfg('; c\nPOST_INTERVAL = 7 ; 行末\nMAX_THREADS = "50"\nJUMP_ENABLED = off\n'
++               'AMEZO = ＠テスト\nTRUSTED_PROXIES[] = 127.0.0.1\nTRUSTED_PROXIES[] = ::1\n'
++               'URLBASE = http://example.com/\n')
++chk('config: 正しい値は型を直して通る', v,
++    {'POST_INTERVAL': 7, 'MAX_THREADS': 50, 'JUMP_ENABLED': False, 'AMEZO': '＠テスト',
++     'TRUSTED_PROXIES': ['127.0.0.1', '::1'], 'URLBASE': 'http://example.com/'})
++chk('config: 正しい値ならエラーなし', e, [])
++
++BAD = {
++    'ADMIN = "${HOME}"': 'ADMIN',
++    'SUBJ_MAX = E_ALL': 'SUBJ_MAX',
++    'COMM_MAX = 400abc': 'COMM_MAX',
++    'NAME_MAX =': 'NAME_MAX',
++    'POST_INTERVAL = 99999': 'POST_INTERVAL',
++    'POST_INTERVAL = -1': 'POST_INTERVAL',
++    'POST_INTERVAL = 1.5': 'POST_INTERVAL',
++    'HASH_ITERATIONS = 10': 'HASH_ITERATIONS',
++    'AMEZO = <script>alert(1)</script>': 'AMEZO',
++    'AMEZO = a"b': 'AMEZO',
++    'AMEZO = a&b': 'AMEZO',
++    'ADMIN =': 'ADMIN',
++    'URLBASE = javascript:alert(1)': 'URLBASE',
++    'URLBASE = http://a.com/"><x': 'URLBASE',
++    'TRUSTED_PROXIES[] = not-an-ip': 'TRUSTED_PROXIES',
++    'JUMP_ENABLED = maybe': 'JUMP_ENABLED',
++    'UNKNOWN_KEY = 1': 'UNKNOWN_KEY',
++    'TRIP_CTX = evil': 'TRIP_CTX',
++    'TRIP_SECRET_FILE = /etc/passwd': 'TRIP_SECRET_FILE',
++}
++for line, key in BAD.items():
++    v, e = loadcfg(line + '\n')
++    chk(f'config: 無視される: {line}', (key in v, len(e)), (False, 1))
++
++v, _ = loadcfg('AMEZO = ' + 'あ' * 40 + '\n')
++chk('config: 40文字ちょうどは通る', len(v.get('AMEZO', '')), 40)
++v, _ = loadcfg('AMEZO = ' + 'あ' * 41 + '\n')
++chk('config: 41文字は通らない', 'AMEZO' in v, False)
++v, _ = loadcfg('TRUSTED_PROXIES =\n')
++chk('config: TRUSTED_PROXIES を空にすると、どのプロキシも信用しない', v, {'TRUSTED_PROXIES': []})
++v, e = loadcfg('POST_INTERVAL = 3\n[bad\n')
++chk('config: 書き方の誤り (構文エラー) は、全体を使わない', (v, len(e)), ({}, 1))
++v, e = loadcfg('AMEZO = "abc\nPOST_INTERVAL = 3\n')
++chk('config: 閉じていない引用符の行は無視され、ほかの行は使われる', (v, len(e)), ({'POST_INTERVAL': 3}, 1))
++v, e = loadcfg('POST_INTERVAL = 3\nPOST_INTERVAL = 99999\nMAX_THREADS = 10\n')
++chk('config: 同じキーが複数あっても、最後の値で検査される', (v, len(e)), ({'MAX_THREADS': 10}, 1))
++chk('config: ファイルが無ければ空', amezo.config_load('/nonexistent/config.ini'), ({}, []))
++defaults_ok = True
++for k, (t, d, mn, mx) in amezo.config_schema().items():
++    if t in ('ips', 'bool'):
++        continue
++    o, _ = amezo.config_check(t, str(d), mn, mx)
++    if not o:
++        defaults_ok = k
++chk('config: 表の既定値は、自分の検査を通る', defaults_ok, True)
++
++# ---- 中継リンク (jump) ----
++out = amezo.linkify_urls(amezo.html_escape('x https://a.com/?x=1&y=2'), True)
++m = re.search(r'href="\.\./jump\.cgi\?u=([^&]+)&amp;s=([^"]+)"', out)
++chk('中継リンク: href が jump.cgi', m is not None, True)
++u, s = m.group(1), m.group(2)
++chk('中継リンク: u を戻すと元の URL', amezo.b64url_decode(u).decode(), 'https://a.com/?x=1&y=2')
++chk('中継リンク: 署名が合う', amezo.jump_verify('https://a.com/?x=1&y=2', s), True)
++chk('中継リンク: 署名の改ざんは通らない', amezo.jump_verify('https://a.com/?x=1&y=2', 'A' * 22), False)
++chk('中継リンク: 表示する文字は元の URL', '>https://a.com/?x=1&amp;y=2</a>' in out, True)
++chk('中継リンク: target/rel が付く', 'target="_blank" rel="noopener noreferrer nofollow"' in out, True)
++chk('中継リンク: 同じ本文は同じ出力 (二重投稿の判定が効く)',
++    amezo.linkify_urls(amezo.html_escape('x https://a.com/b'), True),
++    amezo.linkify_urls(amezo.html_escape('x https://a.com/b'), True))
++chk('中継リンク: 直リンク指定 (False) は元の形',
++    'href="https://a.com/x"' in amezo.linkify_urls('https://a.com/x', False), True)
++evil = amezo.linkify_urls(amezo.html_escape('https://a.com/x," onmouseover="alert(1)'), True)
++chk('中継リンク: 属性を抜け出せない', re.search(r'<[^>]*onmouseover', evil) is None, True)
++chk('中継リンク: 直後の日本語は URL に含めない',
++    amezo.linkify_urls(amezo.html_escape('https://a.com/bです'), True).endswith('</a>です'), True)
++chk('中継リンク: 末尾の句読点は含めない',
++    amezo.linkify_urls(amezo.html_escape('(https://a.com/b).'), True).endswith('</a>).'), True)
++chk('url_is_valid: javascript は不可', amezo.url_is_valid('javascript:alert(1)'), False)
++chk('url_is_valid: 長すぎる URL は不可', amezo.url_is_valid('https://a.com/' + 'x' * 2000), False)
++chk('b64url: 不正な文字種は None', amezo.b64url_decode('a+b/c='), None)
++chk('b64url: 往復', amezo.b64url_decode(amezo.b64url_encode(b'\x00\xffabc')), b'\x00\xffabc')
++
++# ---- 認証キー ----
++os.makedirs('board1')
++r = amezo.key_issue('board1', ' テスト ', '123')
++chk('鍵: 発行できる', r is not None, True)
++kid, disp = r
++chk('鍵: 表示は4文字区切り24文字', re.fullmatch(r'[A-Z2-7]{4}(-[A-Z2-7]{4}){5}', disp) is not None, True)
++chk('鍵: 照合できる', amezo.key_verify('board1', '123', disp), True)
++chk('鍵: 小文字・区切りなしでも通る', amezo.key_verify('board1', '123', disp.replace('-', '').lower()), True)
++chk('鍵: 範囲外のスレッドは不可', amezo.key_verify('board1', '999', disp), False)
++chk('鍵: 間違ったキーは不可', amezo.key_verify('board1', '123', 'AAAA-AAAA-AAAA-AAAA-AAAA-AAAA'), False)
++r2 = amezo.key_issue('board1', '', '*')
++chk('鍵: 板全体のキーは他スレッドでも通る', amezo.key_verify('board1', '999', r2[1]), True)
++chk('鍵: ラベル空は (無題)', amezo.keys_load('board1')[1]['label'], '(無題)')
++chk('鍵: 失効できる', amezo.key_revoke('board1', kid), True)
++chk('鍵: 失効後は不可', amezo.key_verify('board1', '123', disp), False)
++chk('鍵: 再失効は失敗', amezo.key_revoke('board1', kid), False)
++with open('board1/123.html', 'w', encoding='utf-8') as f:
++    f.write('<html><body><dl><dt>1 x</dl>\n' + amezo.reply_form('123') + '</body></html>\n')
++chk('鍵: かける', amezo.thread_set_lock('board1', '123', True) and amezo.thread_is_locked('board1', '123'), True)
++chk('鍵: フォームに鍵欄が付く', 'name="key"' in open('board1/123.html', encoding='utf-8').read(), True)
++chk('鍵: 外す', amezo.thread_set_lock('board1', '123', False) and not amezo.thread_is_locked('board1', '123'), True)
++chk('鍵: フォームから鍵欄が消える', 'name="key"' not in open('board1/123.html', encoding='utf-8').read(), True)
++
++# ---- ページ送り ----
++os.makedirs('board2')
++for i in range(45):
++    open(f'board2/{260101000000 + i}.html', 'w').close()
++chk('page_clamp: 範囲内はそのまま', amezo.page_clamp('board2', 2), 2)
++chk('page_clamp: 範囲外は最後のページ', amezo.page_clamp('board2', 99), 3)
++chk('page_clamp: 1以下は1', amezo.page_clamp('board2', 0), 1)
++p = amezo.pager_html('board2', 1, 3)
++chk('pager: 10ページ以下は全部の番号', all(f'>{i}</a>' in p or f'>[{i}]<' in p or f'<b>[{i}]</b>' in p for i in (1, 2, 3)), True)
++chk('pager: 現在ページは [N]', '<b>[1]</b>' in p, True)
++chk('pager: 外側の class', 'class="row links pager"' in p, True)
++p = amezo.pager_html('board2', 10, 20)
++chk('pager: 多いときは間を … にする', '…' in p and '>5</a>' not in p, True)
++chk('pager: 1ページだけなら空', amezo.pager_html('board2', 1, 1), '')
++
++# ---- 転送 IP の厳密検証 ----
++os.environ['REMOTE_ADDR'] = '127.0.0.1'
++os.environ['HTTP_CF_CONNECTING_IP'] = '999.1.1.1'
++chk('client_ip: 壊れた転送 IP は信用しない', amezo.client_ip(), '127.0.0.1')
++os.environ['HTTP_CF_CONNECTING_IP'] = '203.0.113.9'
++chk('client_ip: 正しい転送 IP は使う', amezo.client_ip(), '203.0.113.9')
++
++print(f'== OK {ok} / NG {ng}')
++sys.exit(1 if ng else 0)
